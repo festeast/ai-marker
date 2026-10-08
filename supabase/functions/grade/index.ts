@@ -66,7 +66,7 @@ async function gradeWithAnthropic(apiKey: string, content: string): Promise<AiRe
       output_config: { format: betaZodOutputFormat(GradesSchema) },
     });
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) return { error: "ai_not_configured", status: 500 };
+    if (err instanceof Anthropic.AuthenticationError) return { error: "ai_bad_key", status: 500, detail: err.message };
     if (err instanceof Anthropic.RateLimitError) return { error: "ai_busy", status: 429 };
     if (err instanceof Anthropic.APIError) return { error: "ai_failed", status: 502, detail: err.message };
     throw err;
@@ -91,7 +91,7 @@ async function gradeWithOpenRouter(apiKey: string, content: string): Promise<AiR
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const detail = body?.error?.message ?? `HTTP ${res.status}`;
-    if (res.status === 401) return { error: "ai_not_configured", status: 500, detail };
+    if (res.status === 401) return { error: "ai_bad_key", status: 500, detail };
     if (res.status === 402) return { error: "ai_no_credits", status: 402, detail };
     if (res.status === 429) return { error: "ai_busy", status: 429, detail };
     if (/model/i.test(detail) && (res.status === 400 || res.status === 404)) return { error: "ai_bad_model", status: 400, detail };
@@ -106,23 +106,48 @@ async function gradeWithOpenRouter(apiKey: string, content: string): Promise<AiR
   return { grades: parsed.data };
 }
 
+// Сколько потрачено и сколько осталось на счёте OpenRouter (суммы в долларах).
+async function openRouterUsage(apiKey: string) {
+  const get = (path: string) =>
+    fetch("https://openrouter.ai/api/v1/" + path, { headers: { Authorization: `Bearer ${apiKey}` } })
+      .then((r) => (r.ok ? r.json() : null)).then((b) => b?.data ?? null).catch(() => null);
+  const [key, credits] = await Promise.all([get("key"), get("credits")]);
+  if (!key) return { provider: "openrouter", error: "ai_bad_key" };
+  return {
+    provider: "openrouter",
+    spent: credits?.total_usage ?? key.usage ?? null,
+    spentToday: key.usage_daily ?? null,
+    balance: credits ? credits.total_credits - credits.total_usage : key.limit_remaining ?? null,
+    freeTier: key.is_free_tier ?? null,
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ error: "invalid_request" }, 405);
 
   const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
   const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
-  if (!anthropicKey && !openRouterKey) return json({ error: "ai_not_configured" }, 500);
+  if (!anthropicKey && !openRouterKey) return json({ error: "ai_not_configured", detail: "OPENROUTER_API_KEY is not set" }, 500);
 
-  const { examId, participantId } = await req.json().catch(() => ({}));
-  if (!Number.isInteger(examId) || !Number.isInteger(participantId)) return json({ error: "invalid_request" }, 400);
+  const { action, examId, participantId } = await req.json().catch(() => ({}));
 
   // Работаем с базой от имени учителя, который вызвал функцию.
+  const authHeader = req.headers.get("Authorization") ?? "";
   const supabaseKey = req.headers.get("apikey") ?? Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   const db = createClient(Deno.env.get("SUPABASE_URL")!, supabaseKey, {
-    global: { headers: { Authorization: req.headers.get("Authorization") ?? "" } },
+    global: { headers: { Authorization: authHeader } },
     auth: { persistSession: false },
   });
+
+  if (action === "usage") {
+    const { data: auth } = await db.auth.getUser(authHeader.replace(/^Bearer /, ""));
+    if (!auth?.user) return json({ error: "unauthorized" }, 401);
+    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic" });
+    return json(await openRouterUsage(openRouterKey));
+  }
+
+  if (!Number.isInteger(examId) || !Number.isInteger(participantId)) return json({ error: "invalid_request" }, 400);
 
   const { data: results, error } = await db.rpc("exam_results", { p_exam_id: examId });
   if (error) return json({ error: error.message }, error.message === "unauthorized" ? 401 : 400);

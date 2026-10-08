@@ -30,19 +30,20 @@
 
 ### Оценка с помощью ИИ (по желанию)
 
-Проверку делает Claude (модель `claude-opus-5-5`) через функцию Supabase [`supabase/functions/grade`](supabase/functions/grade/index.ts). Ключ хранится в Supabase и в браузер не попадает.
+Проверку делает Claude через функцию Supabase [`supabase/functions/grade`](supabase/functions/grade/index.ts). Подходит ключ Anthropic или ключ OpenRouter. Ключ хранится в Supabase и в браузер не попадает.
 
 1. Если `supabase/schema.sql` выполнялся раньше, выполните его ещё раз: он добавит баллы, эталонные ответы и таблицу оценок (данные не удаляются).
-2. Получите ключ API на [console.anthropic.com](https://console.anthropic.com) (платно, оплата за использование).
-3. Supabase → *Edge Functions* → *Secrets*: добавьте `ANTHROPIC_API_KEY` со значением ключа.
-4. Supabase → *Edge Functions* → *Deploy a new function* → *Via Editor*. Имя функции: `grade`. Вставьте содержимое `supabase/functions/grade/index.ts` и нажмите *Deploy*.
-5. В настройках функции `grade` выключите *Verify JWT* (*Enforce JWT verification*): функция сама проверяет, что её вызывает владелец экзамена, через базу.
+2. Получите ключ API (платно, оплата за использование) и добавьте его в Supabase → *Edge Functions* → *Secrets*:
+   - ключ [OpenRouter](https://openrouter.ai/keys) — секрет `OPENROUTER_API_KEY`. По умолчанию используется модель `anthropic/claude-opus-5.5`; другую модель можно задать секретом `OPENROUTER_MODEL` (точное имя есть на [openrouter.ai/models](https://openrouter.ai/models)). На счёте OpenRouter должны быть средства;
+   - или ключ [Anthropic](https://console.anthropic.com) — секрет `ANTHROPIC_API_KEY` (модель `claude-opus-5-5`). Если заданы оба ключа, используется Anthropic.
+3. Supabase → *Edge Functions* → *Deploy a new function* → *Via Editor*. Имя функции: `grade`. Вставьте содержимое `supabase/functions/grade/index.ts` и нажмите *Deploy*.
+4. В настройках функции `grade` выключите *Verify JWT* (*Enforce JWT verification*): функция сама проверяет, что её вызывает владелец экзамена, через базу.
 
 ## Как устроено
 
 - `public/` — статичные страницы (HTML/CSS/JS без сборки): главная, вход, мои экзамены, редактор, мониторинг, страница студента.
 - `supabase/schema.sql` — таблицы и функции. Браузер не читает таблицы напрямую (RLS без политик): учитель работает через функции, проверяющие `auth.uid()`, студент — через функции по токену попытки, который выдаётся при входе по коду. Верные ответы студенту не отдаются.
-- `supabase/functions/grade/index.ts` — оценка текстовых ответов одного студента: берёт ответы через `exam_results`, отправляет их Claude и сохраняет результат через `save_ai_grades`. Оба вызова идут от имени учителя, поэтому права проверяет база.
+- `supabase/functions/grade/index.ts` — оценка текстовых ответов одного студента: берёт ответы через `exam_results`, отправляет их Claude (через Anthropic или OpenRouter) и сохраняет результат через `save_ai_grades`. Оба вызова идут от имени учителя, поэтому права проверяет база.
 - Порог «большой вставки» меняется в функции `large_paste_chars()` в `supabase/schema.sql`.
 
 ## Тесты

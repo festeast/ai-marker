@@ -5,7 +5,8 @@
 // работают только для владельца экзамена), поэтому без входа функция ничего не сделает.
 // Нужен один из секретов (Supabase → Edge Functions → Secrets):
 // ANTHROPIC_API_KEY — ключ Anthropic, или OPENROUTER_API_KEY — ключ OpenRouter
-// (модель можно сменить секретом OPENROUTER_MODEL).
+// (бесплатная модель по умолчанию — секрет OPENROUTER_FREE_MODEL,
+// платная по выбору учителя — секрет OPENROUTER_MODEL).
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { betaZodOutputFormat } from "npm:@anthropic-ai/sdk@0.128.0/helpers/beta/zod";
 import { z } from "npm:zod@4.6.5";
@@ -13,6 +14,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.117.2";
 
 const MODEL = "claude-opus-5-5";
 const OPENROUTER_MODEL = "anthropic/claude-opus-5.5";
+const OPENROUTER_FREE_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -40,6 +42,11 @@ Return one grade for every question you were given, using its questionId.`;
 
 type Question = { id: number; text: string; points: number; reference?: string };
 type Grades = z.infer<typeof GradesSchema>;
+// Бесплатные модели иногда пишут числа строками — принимаем и так.
+const LooseGradesSchema = z.object({
+  grades: z.array(z.object({ questionId: z.coerce.number(), score: z.coerce.number(), comment: z.coerce.string() })),
+});
+const JSON_INSTRUCTION = `Answer with only a JSON object, no other text: {"grades":[{"questionId":<number>,"score":<number>,"comment":"<text>"}]}`;
 // Либо оценки, либо код ошибки для браузера.
 type AiResult = { grades: Grades } | { error: string; status: number; detail?: string };
 type Answer = { value?: string; source?: string };
@@ -76,16 +83,19 @@ async function gradeWithAnthropic(apiKey: string, content: string): Promise<AiRe
 }
 
 // OpenRouter: OpenAI-совместимый API, ответ просим строго по JSON-схеме.
-async function gradeWithOpenRouter(apiKey: string, content: string): Promise<AiResult> {
-  const model = Deno.env.get("OPENROUTER_MODEL") || OPENROUTER_MODEL;
+async function gradeWithOpenRouter(apiKey: string, content: string, paid: boolean): Promise<AiResult> {
+  const model = paid
+    ? Deno.env.get("OPENROUTER_MODEL") || OPENROUTER_MODEL
+    : Deno.env.get("OPENROUTER_FREE_MODEL") || OPENROUTER_FREE_MODEL;
+  // Строгую JSON-схему поддерживают не все бесплатные модели, поэтому для них просим JSON словами.
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-Title": "AI Marker" },
     body: JSON.stringify({
       model,
       max_tokens: 16000,
-      messages: [{ role: "system", content: SYSTEM }, { role: "user", content }],
-      response_format: { type: "json_schema", json_schema: { name: "grades", strict: true, schema: z.toJSONSchema(GradesSchema) } },
+      messages: [{ role: "system", content: paid ? SYSTEM : `${SYSTEM}\n\n${JSON_INSTRUCTION}` }, { role: "user", content }],
+      ...(paid ? { response_format: { type: "json_schema", json_schema: { name: "grades", strict: true, schema: z.toJSONSchema(GradesSchema) } } } : {}),
     }),
   });
   const body = await res.json().catch(() => null);
@@ -93,15 +103,15 @@ async function gradeWithOpenRouter(apiKey: string, content: string): Promise<AiR
     const detail = body?.error?.message ?? `HTTP ${res.status}`;
     if (res.status === 401) return { error: "ai_bad_key", status: 500, detail };
     if (res.status === 402) return { error: "ai_no_credits", status: 402, detail };
-    if (res.status === 429) return { error: "ai_busy", status: 429, detail };
-    if (/model/i.test(detail) && (res.status === 400 || res.status === 404)) return { error: "ai_bad_model", status: 400, detail };
+    if (res.status === 429) return { error: paid ? "ai_busy" : "ai_free_limit", status: 429, detail };
+    if (res.status === 404 || (res.status === 400 && /model/i.test(detail))) return { error: "ai_bad_model", status: 400, detail };
     return { error: "ai_failed", status: 502, detail };
   }
   const text: string = body?.choices?.[0]?.message?.content ?? "";
   // На случай, если модель обернула JSON в ```json ... ```.
   const raw = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
   let parsed;
-  try { parsed = GradesSchema.safeParse(JSON.parse(raw)); } catch { parsed = null; }
+  try { parsed = LooseGradesSchema.safeParse(JSON.parse(raw)); } catch { parsed = null; }
   if (!parsed?.success) return { error: "ai_failed", status: 502, detail: "unexpected answer format" };
   return { grades: parsed.data };
 }
@@ -130,7 +140,7 @@ Deno.serve(async (req: Request) => {
   const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
   if (!anthropicKey && !openRouterKey) return json({ error: "ai_not_configured", detail: "OPENROUTER_API_KEY is not set" }, 500);
 
-  const { action, examId, participantId } = await req.json().catch(() => ({}));
+  const { action, examId, participantId, quality } = await req.json().catch(() => ({}));
 
   // Работаем с базой от имени учителя, который вызвал функцию.
   const authHeader = req.headers.get("Authorization") ?? "";
@@ -176,7 +186,7 @@ Deno.serve(async (req: Request) => {
 </question>`).join("\n\n");
 
     const content = `Exam: ${escapeXml(results.exam.title)}\n\n${prompt}`;
-    const result = anthropicKey ? await gradeWithAnthropic(anthropicKey, content) : await gradeWithOpenRouter(openRouterKey!, content);
+    const result = anthropicKey ? await gradeWithAnthropic(anthropicKey, content) : await gradeWithOpenRouter(openRouterKey!, content, quality === "paid");
     if ("error" in result) return json({ error: result.error, detail: result.detail }, result.status);
 
     const allowed = new Set(answered.map((q) => q.id));

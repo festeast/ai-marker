@@ -15,7 +15,15 @@
       <h1 id="title" style="margin:0 0 12px"></h1>
       <div id="summary"></div>
       <div id="ai-box" hidden style="margin-top:16px">
-        <div class="row"><button id="ai-all" data-i18n="ai_grade_all"></button><span id="ai-msg" class="muted"></span></div>
+        <div class="row">
+          <label class="row" style="margin:0"><span data-i18n="ai_model"></span>
+            <select id="ai-quality">
+              <option value="free" data-i18n="ai_model_free"></option>
+              <option value="paid" data-i18n="ai_model_paid"></option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px"><button id="ai-all" data-i18n="ai_grade_all"></button><span id="ai-msg" class="muted"></span></div>
         <p class="muted" data-i18n="ai_hint"></p>
       </div>
     </div>
@@ -103,11 +111,11 @@
       aiRunning = true;
       const msg = document.getElementById('ai-msg');
       msg.className = 'muted';
-      document.querySelectorAll('#ai-all, #students button').forEach((b) => { b.disabled = true; });
+      document.querySelectorAll('#ai-all, #ai-quality, #students button').forEach((b) => { b.disabled = true; });
       try {
         for (let i = 0; i < students.length; i++) {
           msg.textContent = `${t('ai_grading')}: ${students[i].name} (${i + 1} / ${students.length})…`;
-          await callFunction('grade', { examId: id, participantId: students[i].id });
+          await callFunction('grade', { examId: id, participantId: students[i].id, quality: quality.value });
         }
         msg.className = 'ok';
         msg.textContent = t('ai_done');
@@ -119,9 +127,15 @@
         await load().catch(showPageError);
         refreshAiUsage();
         document.getElementById('ai-all').disabled = false;
+        quality.disabled = false;
         if (button) document.getElementById('ai-box').scrollIntoView({ block: 'nearest' });
       }
     }
+
+    // Модель ИИ: бесплатная по умолчанию, выбор запоминается в браузере.
+    const quality = document.getElementById('ai-quality');
+    try { quality.value = localStorage.getItem('aiQuality') === 'paid' ? 'paid' : 'free'; } catch {}
+    quality.addEventListener('change', () => { try { localStorage.setItem('aiQuality', quality.value); } catch {} });
 
     document.getElementById('ai-all').addEventListener('click', () => {
       gradeWithAi(data.participants.filter((p) => p.submittedAt));

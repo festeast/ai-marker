@@ -34,7 +34,7 @@
 
 1. Если `supabase/schema.sql` выполнялся раньше, выполните его ещё раз: он добавит баллы, эталонные ответы и таблицу оценок (данные не удаляются).
 2. Получите ключ API (платно, оплата за использование) и добавьте его в Supabase → *Edge Functions* → *Secrets*:
-   - ключ [OpenRouter](https://openrouter.ai/keys) — секрет `OPENROUTER_API_KEY`. По умолчанию используется модель `anthropic/claude-opus-5.5`; другую модель можно задать секретом `OPENROUTER_MODEL` (точное имя есть на [openrouter.ai/models](https://openrouter.ai/models)). На счёте OpenRouter должны быть средства;
+   - ключ [OpenRouter](https://openrouter.ai/keys) — секрет `OPENROUTER_API_KEY`. На странице «Ответы и оценки» учитель выбирает модель: **бесплатную** (по умолчанию, `meta-llama/llama-3.3-70b-instruct:free`, у OpenRouter есть дневной лимит бесплатных запросов) или **платную** (точнее, `anthropic/claude-opus-5.5`, нужен баланс). Модели можно сменить секретами `OPENROUTER_FREE_MODEL` и `OPENROUTER_MODEL` (точные имена — на [openrouter.ai/models](https://openrouter.ai/models), бесплатные оканчиваются на `:free`);
    - или ключ [Anthropic](https://console.anthropic.com) — секрет `ANTHROPIC_API_KEY` (модель `claude-opus-5-5`). Если заданы оба ключа, используется Anthropic.
 3. Supabase → *Edge Functions* → *Deploy a new function* → *Via Editor*. Имя функции: `grade`. Вставьте содержимое `supabase/functions/grade/index.ts` и нажмите *Deploy*.
 4. В настройках функции `grade` выключите *Verify JWT* (*Enforce JWT verification*): функция сама проверяет, что её вызывает владелец экзамена, через базу.

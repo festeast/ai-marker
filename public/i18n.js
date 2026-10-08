@@ -122,6 +122,7 @@ const I18N = {
     err_exam_not_open: 'Экзамен сейчас не принимает ответы',
     err_already_submitted: 'Работа уже сдана',
     err_not_found: 'Не найдено',
+    err_schema_outdated: 'База данных не обновлена: выполните заново весь файл supabase/schema.sql в Supabase → SQL Editor',
     err_server_error: 'Ошибка сервера, попробуйте ещё раз',
     err_network: 'Нет связи с сервером',
     err_invalid_points: 'Баллы за вопрос: целое число от 1 до 100',

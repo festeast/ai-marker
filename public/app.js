@@ -14,8 +14,15 @@ async function rpc(fn, args = {}) {
   if (!db) throw appError('not_configured');
   const { data, error } = await db.rpc(fn, args);
   if (error) {
-    const code = I18N.ru['err_' + error.message] ? error.message : (error.message || '').includes('fetch') ? 'network' : 'server_error';
-    throw appError(code);
+    const msg = error.message || '';
+    if (I18N.ru['err_' + msg]) throw appError(msg);
+    if (msg.includes('fetch')) throw appError('network');
+    // Функции нет в базе: schema.sql не выполнен заново после обновления сайта.
+    if (error.code === 'PGRST202' || msg.includes('Could not find the function')) throw appError('schema_outdated');
+    // Неизвестная ошибка: показываем и текст от сервера, чтобы было понятно, что случилось.
+    const err = appError('server_error');
+    if (msg) err.message += ' (' + msg + ')';
+    throw err;
   }
   return data;
 }

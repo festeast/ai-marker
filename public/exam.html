@@ -3,7 +3,9 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Экзамен — AI Marker</title>
-  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
 </head>
 <body>
   <header><div class="wrap"><span class="brand" data-i18n="app_name"></span><span class="muted" id="who"></span></div></header>
@@ -29,7 +31,7 @@
     <div class="error" id="err"></div>
   </main>
   <script>
-    const code = decodeURIComponent(location.pathname.split('/').pop()).toUpperCase();
+    const code = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
     const storeKey = 'attempt:' + code;
     let token = null;
     try { token = localStorage.getItem(storeKey); } catch {}
@@ -37,26 +39,33 @@
     let finished = false;
 
     const showError = (err) => { document.getElementById('err').textContent = err.message; };
-    const attemptApi = (method, url, body) => api(method, url, body, { 'X-Attempt-Token': token });
 
     // ---------- отслеживание: уход со страницы и вставки ----------
     let away = false, awaySince = 0, suppress = false;
 
-    function sendEvent(body) {
+    function sendEvent(type, detail) {
       if (finished) return;
-      attemptApi('POST', '/api/public/attempt/events', body).catch(() => {});
+      rpc('log_event', { p_token: token, p_type: type, p_detail: detail }).catch(() => {});
     }
     function markAway(reason) {
       if (away || suppress || finished) return;
       away = true; awaySince = Date.now();
-      sendEvent({ type: 'leave', reason });
+      sendEvent('leave', { reason });
     }
     function markBack() {
       if (!away || document.visibilityState !== 'visible' || !document.hasFocus()) return;
       away = false;
-      sendEvent({ type: 'return', awayMs: Date.now() - awaySince });
+      sendEvent('return', { awayMs: Date.now() - awaySince });
     }
     function startTracking() {
+      // Студент закрывал или перезагружал страницу — отмечаем возвращение.
+      let closedAt = null;
+      try { closedAt = Number(localStorage.getItem(storeKey + ':closedAt')); localStorage.removeItem(storeKey + ':closedAt'); } catch {}
+      // Событие при закрытии могло не дойти, поэтому повторяем его (сервер не запишет дубль).
+      if (closedAt) {
+        rpc('log_event', { p_token: token, p_type: 'leave', p_detail: { reason: 'close' } })
+          .finally(() => sendEvent('return', { awayMs: Date.now() - closedAt }));
+      }
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') markAway('hidden'); else markBack();
       });
@@ -64,27 +73,28 @@
       window.addEventListener('focus', markBack);
       window.addEventListener('pagehide', () => {
         if (finished) return;
-        navigator.sendBeacon('/api/public/attempt/events', JSON.stringify({ token, type: 'leave', reason: 'close' }));
+        try { localStorage.setItem(storeKey + ':closedAt', String(Date.now())); } catch {}
+        rpcKeepalive('log_event', { p_token: token, p_type: 'leave', p_detail: { reason: 'close' } });
       });
       document.addEventListener('paste', (e) => {
         const text = (e.clipboardData && e.clipboardData.getData('text')) || '';
         const q = e.target.closest && e.target.closest('[data-qid]');
-        sendEvent({ type: 'paste', length: text.length, text, questionId: q ? Number(q.dataset.qid) : null });
+        sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null });
       });
       document.addEventListener('drop', (e) => {
         const text = (e.dataTransfer && e.dataTransfer.getData('text')) || '';
         if (!text) return;
         const q = e.target.closest && e.target.closest('[data-qid]');
-        sendEvent({ type: 'paste', length: text.length, text, questionId: q ? Number(q.dataset.qid) : null });
+        sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null });
       });
-      setInterval(() => { if (!finished) attemptApi('POST', '/api/public/attempt/heartbeat').catch(() => {}); }, 10000);
+      setInterval(() => { if (!finished) rpc('heartbeat', { p_token: token }).catch(() => {}); }, 10000);
     }
 
     // ---------- ответы ----------
     let saveTimer = null;
     function scheduleSave() {
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => attemptApi('POST', '/api/public/attempt/answers', { answers }).catch(showError), 800);
+      saveTimer = setTimeout(() => rpc('save_answers', { p_token: token, p_answers: answers }).catch(showError), 800);
     }
 
     function renderQuestions(data) {
@@ -116,7 +126,7 @@
     }
 
     async function loadAttempt() {
-      const data = await attemptApi('GET', '/api/public/attempt');
+      const data = await rpc('get_attempt', { p_token: token });
       document.getElementById('who').textContent = data.name;
       Object.assign(answers, data.answers);
       if (data.submitted) return showDone();
@@ -129,8 +139,7 @@
     document.getElementById('join-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
-        const res = await api('POST', `/api/public/exams/${encodeURIComponent(code)}/join`, { name: document.getElementById('name').value });
-        token = res.token;
+        token = await rpc('join_exam', { p_code: code, p_name: document.getElementById('name').value });
         try { localStorage.setItem(storeKey, token); } catch {}
         document.getElementById('join').hidden = true;
         await loadAttempt();
@@ -144,19 +153,19 @@
       if (!ok) return;
       try {
         clearTimeout(saveTimer);
-        await attemptApi('POST', '/api/public/attempt/submit', { answers });
+        await rpc('submit_attempt', { p_token: token, p_answers: answers });
         showDone();
       } catch (err) { showError(err); }
     });
 
     (async () => {
       try {
-        const exam = await api('GET', '/api/public/exams/' + encodeURIComponent(code));
+        const exam = await rpc('exam_by_code', { p_code: code });
         document.getElementById('title').textContent = exam.title;
         document.title = exam.title + ' — AI Marker';
         if (token) {
           try { return await loadAttempt(); } catch (err) {
-            if (err.status !== 401) throw err;
+            if (err.code !== 'unauthorized') throw err;
             token = null;
           }
         }

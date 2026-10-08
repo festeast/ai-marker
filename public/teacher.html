@@ -3,7 +3,10 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Мои экзамены — AI Marker</title>
-  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script><script src="/teacher-common.js"></script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -27,7 +30,7 @@
   </main>
   <script>
     async function load() {
-      const exams = await api('GET', '/api/exams');
+      const exams = await rpc('list_exams');
       const list = document.getElementById('list');
       list.replaceChildren();
       if (!exams.length) { list.append(el('p', { class: 'muted' }, t('no_exams'))); return; }
@@ -37,22 +40,22 @@
         el('td', {}, x.code ? el('code', {}, x.code) : '—'),
         el('td', {}, `${t('participants')}: ${x.participantCount}`),
         el('td', {}, x.status === 'draft'
-          ? el('a', { href: '/edit?id=' + x.id }, t('open'))
-          : el('a', { href: '/monitor?id=' + x.id }, t('monitor'))),
+          ? el('a', { href: 'edit.html?id=' + x.id }, t('open'))
+          : el('a', { href: 'monitor.html?id=' + x.id }, t('monitor'))),
       ));
       list.append(el('div', { class: 'table-scroll' }, el('table', {}, el('tbody', {}, rows))));
     }
     document.getElementById('new-exam').addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
-        const exam = await api('POST', '/api/exams', {
-          title: document.getElementById('title').value,
-          type: document.querySelector('input[name=type]:checked').value,
+        const exam = await rpc('create_exam', {
+          p_title: document.getElementById('title').value,
+          p_type: document.querySelector('input[name=type]:checked').value,
         });
-        location.href = '/edit?id=' + exam.id;
+        location.href = 'edit.html?id=' + exam.id;
       } catch (err) { document.getElementById('err').textContent = err.message; }
     });
-    requireLogin().then(load);
+    requireLogin().then(load).catch((err) => { document.getElementById('err').textContent = err.message; });
   </script>
 </body>
 </html>

@@ -101,6 +101,9 @@ const I18N = {
     err_not_found: 'Не найдено',
     err_server_error: 'Ошибка сервера, попробуйте ещё раз',
     err_network: 'Нет связи с сервером',
+    err_email_not_confirmed: 'Подтвердите email по ссылке из письма',
+    err_not_configured: 'Сайт ещё не подключён к базе: заполните public/config.js',
+    check_email: 'Мы отправили письмо со ссылкой. Откройте его, чтобы подтвердить email, затем войдите.',
   },
   kk: {},
 };
@@ -112,47 +115,3 @@ function t(key) {
   return (I18N[LANG] && I18N[LANG][key]) || I18N.ru[key] || key;
 }
 
-// Заполняет элементы с data-i18n / data-i18n-placeholder.
-function applyI18n(root = document) {
-  root.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-  root.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-}
-
-async function api(method, url, body, headers = {}) {
-  let res;
-  try {
-    res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch {
-    throw Object.assign(new Error(t('err_network')), { code: 'network' });
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(t('err_' + (data.error || 'server_error'))), { code: data.error, status: res.status });
-  return data;
-}
-
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
-    else if (v !== false && v !== null && v !== undefined) node.setAttribute(k, v === true ? '' : v);
-  }
-  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) node.append(c);
-  return node;
-}
-
-function fmtTime(ms) {
-  return new Date(ms).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-function fmtDuration(ms) {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} с`;
-  return `${Math.floor(s / 60)} мин ${s % 60} с`;
-}
-
-document.addEventListener('DOMContentLoaded', () => applyI18n());

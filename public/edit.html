@@ -3,11 +3,14 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Редактор — AI Marker</title>
-  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script><script src="/teacher-common.js"></script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
 </head>
 <body>
   <main class="wrap">
-    <p><a href="/teacher" data-i18n="back"></a></p>
+    <p><a href="teacher.html" data-i18n="back"></a></p>
     <div class="card">
       <label for="title" data-i18n="exam_title"></label>
       <input type="text" id="title">
@@ -27,7 +30,7 @@
     <div class="error" id="err"></div>
   </main>
   <script>
-    const id = new URLSearchParams(location.search).get('id');
+    const id = Number(new URLSearchParams(location.search).get('id'));
     let exam;
 
     function blankQuestion() {
@@ -70,7 +73,7 @@
     async function save() {
       document.getElementById('err').textContent = '';
       exam.title = document.getElementById('title').value;
-      const saved = await api('PUT', '/api/exams/' + id, { title: exam.title, questions: exam.questions });
+      const saved = await rpc('save_exam', { p_exam_id: id, p_title: exam.title, p_questions: exam.questions });
       exam.questions = saved.questions;
       render();
     }
@@ -92,23 +95,23 @@
       await save();
       if (!exam.questions.length) throw new Error(t('err_no_questions'));
       if (!confirm(t('confirm_publish_q'))) return;
-      await api('POST', `/api/exams/${id}/publish`);
-      location.href = '/monitor?id=' + id;
+      await rpc('publish_exam', { p_exam_id: id });
+      location.href = 'monitor.html?id=' + id;
     }));
     document.getElementById('delete').addEventListener('click', withErrors(async () => {
       if (!confirm(t('delete_exam_q'))) return;
-      await api('DELETE', '/api/exams/' + id);
-      location.href = '/teacher';
+      await rpc('delete_exam', { p_exam_id: id });
+      location.href = 'teacher.html';
     }));
 
     requireLogin().then(async () => {
-      exam = await api('GET', '/api/exams/' + id);
-      if (exam.status !== 'draft') { location.href = '/monitor?id=' + id; return; }
+      exam = await rpc('get_exam', { p_exam_id: id });
+      if (exam.status !== 'draft') { location.href = 'monitor.html?id=' + id; return; }
       document.getElementById('title').value = exam.title;
       document.getElementById('type').textContent = t(exam.type === 'quiz' ? 'type_quiz' : 'type_text');
       if (!exam.questions.length) exam.questions.push(blankQuestion());
       render();
-    });
+    }).catch(showPageError);
   </script>
 </body>
 </html>

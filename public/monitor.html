@@ -3,11 +3,14 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Мониторинг — AI Marker</title>
-  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script><script src="/teacher-common.js"></script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
 </head>
 <body>
   <main class="wrap">
-    <p><a href="/teacher" data-i18n="back"></a></p>
+    <p><a href="teacher.html" data-i18n="back"></a></p>
     <div class="card">
       <div class="row spread">
         <h1 id="title" style="margin:0"></h1>
@@ -32,9 +35,10 @@
       </div>
       <ul class="events" id="events"></ul>
     </div>
+    <div class="error" id="err"></div>
   </main>
   <script>
-    const id = new URLSearchParams(location.search).get('id');
+    const id = Number(new URLSearchParams(location.search).get('id'));
     let lastEventId = 0;
     const events = [];
 
@@ -90,12 +94,12 @@
 
     async function poll() {
       try {
-        const data = await api('GET', `/api/exams/${id}/monitor?after=${lastEventId}`);
+        const data = await rpc('exam_monitor', { p_exam_id: id, p_after: lastEventId });
         const x = data.exam;
         document.getElementById('title').textContent = x.title;
         const status = document.getElementById('status');
         status.textContent = t('status_' + x.status); status.className = 'badge ' + x.status;
-        if (x.status === 'draft') { location.href = '/edit?id=' + id; return; }
+        if (x.status === 'draft') { location.href = 'edit.html?id=' + id; return; }
         document.getElementById('share').hidden = x.status !== 'published';
         document.getElementById('close').hidden = x.status !== 'published';
         document.getElementById('code').textContent = x.code;
@@ -107,6 +111,8 @@
           lastEventId = data.events[data.events.length - 1].id;
           renderEvents();
         }
+      } catch (err) {
+        document.getElementById('err').textContent = err.message;
       } finally {
         setTimeout(poll, 3000);
       }
@@ -117,10 +123,10 @@
     document.getElementById('only-flagged').addEventListener('change', renderEvents);
     document.getElementById('close').addEventListener('click', async () => {
       if (!confirm(t('close_exam_q'))) return;
-      await api('POST', `/api/exams/${id}/close`);
+      await rpc('close_exam', { p_exam_id: id });
     });
 
-    requireLogin().then(poll);
+    requireLogin().then(poll).catch(showPageError);
   </script>
 </body>
 </html>

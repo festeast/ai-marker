@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Marker</title>
-  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
 </head>
 <body>
-  <header><div class="wrap"><a class="brand" href="/" data-i18n="app_name"></a><a href="/teacher" data-i18n="teacher_login"></a></div></header>
+  <header><div class="wrap"><a class="brand" href="index.html" data-i18n="app_name"></a><a href="teacher.html" data-i18n="teacher_login"></a></div></header>
   <main class="wrap narrow">
     <div class="card">
       <p class="muted" data-i18n="student_intro"></p>
@@ -23,8 +25,8 @@
       e.preventDefault();
       const code = document.getElementById('code').value.trim().toUpperCase();
       try {
-        await api('GET', '/api/public/exams/' + encodeURIComponent(code));
-        location.href = '/e/' + code;
+        await rpc('exam_by_code', { p_code: code });
+        location.href = examLink(code);
       } catch (err) { document.getElementById('err').textContent = err.message; }
     });
   </script>

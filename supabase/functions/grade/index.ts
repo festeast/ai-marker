@@ -83,10 +83,30 @@ async function gradeWithAnthropic(apiKey: string, content: string): Promise<AiRe
 }
 
 // OpenRouter: OpenAI-совместимый API, ответ просим строго по JSON-схеме.
-async function gradeWithOpenRouter(apiKey: string, content: string, paid: boolean): Promise<AiResult> {
-  const model = paid
-    ? Deno.env.get("OPENROUTER_MODEL") || OPENROUTER_MODEL
-    : Deno.env.get("OPENROUTER_FREE_MODEL") || OPENROUTER_FREE_MODEL;
+// quality: "paid" — платная модель; "free:<id>" — выбранная бесплатная модель (id оканчивается на ":free");
+// иначе — бесплатная модель по умолчанию.
+function pickModel(quality: unknown): { model: string; paid: boolean } {
+  if (quality === "paid") return { model: Deno.env.get("OPENROUTER_MODEL") || OPENROUTER_MODEL, paid: true };
+  if (typeof quality === "string" && quality.startsWith("free:") && quality.endsWith(":free")) {
+    return { model: quality.slice(5), paid: false };
+  }
+  return { model: Deno.env.get("OPENROUTER_FREE_MODEL") || OPENROUTER_FREE_MODEL, paid: false };
+}
+
+// Список бесплатных моделей OpenRouter для выбора на странице.
+async function openRouterFreeModels(apiKey: string) {
+  const res = await fetch("https://openrouter.ai/api/v1/models", { headers: { Authorization: `Bearer ${apiKey}` } }).catch(() => null);
+  const body = res?.ok ? await res.json().catch(() => null) : null;
+  const models = ((body?.data ?? []) as { id: string; name?: string }[])
+    .filter((m) => typeof m.id === "string" && m.id.endsWith(":free"))
+    .map((m) => ({ id: m.id, name: (m.name ?? m.id).replace(/\s*\(free\)$/i, "") }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 60);
+  return { provider: "openrouter", defaultFree: Deno.env.get("OPENROUTER_FREE_MODEL") || OPENROUTER_FREE_MODEL, models };
+}
+
+async function gradeWithOpenRouter(apiKey: string, content: string, quality: unknown): Promise<AiResult> {
+  const { model, paid } = pickModel(quality);
   // Строгую JSON-схему поддерживают не все бесплатные модели, поэтому для них просим JSON словами.
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -157,6 +177,13 @@ Deno.serve(async (req: Request) => {
     return json(await openRouterUsage(openRouterKey));
   }
 
+  if (action === "models") {
+    const { data: auth } = await db.auth.getUser(authHeader.replace(/^Bearer /, ""));
+    if (!auth?.user) return json({ error: "unauthorized" }, 401);
+    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic", models: [] });
+    return json(await openRouterFreeModels(openRouterKey));
+  }
+
   if (!Number.isInteger(examId) || !Number.isInteger(participantId)) return json({ error: "invalid_request" }, 400);
 
   const { data: results, error } = await db.rpc("exam_results", { p_exam_id: examId });
@@ -186,7 +213,7 @@ Deno.serve(async (req: Request) => {
 </question>`).join("\n\n");
 
     const content = `Exam: ${escapeXml(results.exam.title)}\n\n${prompt}`;
-    const result = anthropicKey ? await gradeWithAnthropic(anthropicKey, content) : await gradeWithOpenRouter(openRouterKey!, content, quality === "paid");
+    const result = anthropicKey ? await gradeWithAnthropic(anthropicKey, content) : await gradeWithOpenRouter(openRouterKey!, content, quality);
     if ("error" in result) return json({ error: result.error, detail: result.detail }, result.status);
 
     const allowed = new Set(answered.map((q) => q.id));

@@ -134,7 +134,23 @@
 
     // Модель ИИ: бесплатная по умолчанию, выбор запоминается в браузере.
     const quality = document.getElementById('ai-quality');
-    try { quality.value = localStorage.getItem('aiQuality') === 'paid' ? 'paid' : 'free'; } catch {}
+    function restoreQuality() {
+      let saved = 'free';
+      try { saved = localStorage.getItem('aiQuality') || 'free'; } catch {}
+      quality.value = saved;
+      if (quality.value !== saved) quality.value = 'free';
+    }
+    restoreQuality();
+    // Остальные бесплатные модели берём из OpenRouter; если не получилось — остаются два варианта.
+    callFunction('grade', { action: 'models' }).then((r) => {
+      if (!r.models || !r.models.length) return;
+      const def = r.models.find((m) => m.id === r.defaultFree);
+      if (def) quality.querySelector('option[value=free]').textContent = t('ai_model_free') + ': ' + def.name;
+      const group = el('optgroup', { label: t('ai_model_free_more') },
+        r.models.filter((m) => m.id !== r.defaultFree).map((m) => el('option', { value: 'free:' + m.id }, m.name)));
+      quality.insertBefore(group, quality.querySelector('option[value=paid]'));
+      restoreQuality();
+    }).catch(() => {});
     quality.addEventListener('change', () => { try { localStorage.setItem('aiQuality', quality.value); } catch {} });
 
     document.getElementById('ai-all').addEventListener('click', () => {

@@ -41,7 +41,9 @@
         el('td', {}, `${t('participants')}: ${x.participantCount}`),
         el('td', {}, x.status === 'draft'
           ? el('a', { href: 'edit.html?id=' + x.id }, t('open'))
-          : el('a', { href: 'monitor.html?id=' + x.id }, t('monitor'))),
+          : el('span', { class: 'row' },
+              el('a', { href: 'monitor.html?id=' + x.id }, t('monitor')),
+              el('a', { href: 'results.html?id=' + x.id }, t('results')))),
       ));
       list.append(el('div', { class: 'table-scroll' }, el('table', {}, el('tbody', {}, rows))));
     }

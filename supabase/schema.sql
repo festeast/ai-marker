@@ -25,6 +25,10 @@ create table if not exists public.questions (
   correct_index int       -- индекс верного варианта (только quiz)
 );
 
+-- Добавлено позже: максимальный балл и эталонный ответ / критерии (для оценки текстовых ответов).
+alter table public.questions add column if not exists points int not null default 1;
+alter table public.questions add column if not exists reference text;
+
 create table if not exists public.participants (
   id bigint generated always as identity primary key,
   exam_id bigint not null references public.exams(id) on delete cascade,
@@ -39,6 +43,17 @@ create table if not exists public.answers (
   participant_id bigint not null references public.participants(id) on delete cascade,
   question_id bigint not null references public.questions(id) on delete cascade,
   value text not null,
+  updated_at timestamptz not null default now(),
+  primary key (participant_id, question_id)
+);
+
+-- Оценка текстового ответа. source: teacher (поставил учитель) | ai (предложил ИИ).
+create table if not exists public.grades (
+  participant_id bigint not null references public.participants(id) on delete cascade,
+  question_id bigint not null references public.questions(id) on delete cascade,
+  score numeric not null,
+  comment text,
+  source text not null check (source in ('teacher', 'ai')),
   updated_at timestamptz not null default now(),
   primary key (participant_id, question_id)
 );
@@ -64,6 +79,7 @@ alter table public.questions enable row level security;
 alter table public.participants enable row level security;
 alter table public.answers enable row level security;
 alter table public.events enable row level security;
+alter table public.grades enable row level security;
 
 -- ---------- Настройки ----------
 
@@ -88,8 +104,9 @@ create or replace function public._questions_json(p_exam_id bigint, p_with_answe
 language sql stable as $$
   select coalesce(jsonb_agg(
     jsonb_strip_nulls(jsonb_build_object(
-      'id', q.id, 'text', q.text, 'options', q.options,
-      'correctIndex', case when p_with_answers then q.correct_index end))
+      'id', q.id, 'text', q.text, 'options', q.options, 'points', q.points,
+      'correctIndex', case when p_with_answers then q.correct_index end,
+      'reference', case when p_with_answers then q.reference end))
     order by q.position), '[]'::jsonb)
   from public.questions q where q.exam_id = p_exam_id
 $$;
@@ -176,7 +193,7 @@ begin
 end $$;
 
 -- Сохраняет название и весь список вопросов черновика целиком.
--- p_questions: [{ "text": "...", "options": ["a","b"], "correctIndex": 0 }, ...]
+-- p_questions: [{ "text": "...", "options": ["a","b"], "correctIndex": 0, "points": 1, "reference": "..." }, ...]
 create or replace function public.save_exam(p_exam_id bigint, p_title text, p_questions jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
@@ -191,6 +208,11 @@ begin
 
   for q in select value from jsonb_array_elements(p_questions) loop
     if jsonb_typeof(q) <> 'object' or coalesce(trim(q->>'text'), '') = '' then raise exception 'question_text_required'; end if;
+    if q ? 'points' and (jsonb_typeof(q->'points') is distinct from 'number'
+       or (q->>'points')::numeric <> floor((q->>'points')::numeric)
+       or (q->>'points')::numeric not between 1 and 100) then
+      raise exception 'invalid_points';
+    end if;
     if e.type = 'quiz' then
       opts := q->'options';
       if opts is null or jsonb_typeof(opts) <> 'array' or jsonb_array_length(opts) < 2
@@ -208,11 +230,13 @@ begin
   update exams set title = trim(p_title) where id = e.id;
   delete from questions where exam_id = e.id;
   for q in select value from jsonb_array_elements(p_questions) loop
-    insert into questions (exam_id, position, text, options, correct_index)
+    insert into questions (exam_id, position, text, options, correct_index, points, reference)
     values (
       e.id, idx, trim(q->>'text'),
       case when e.type = 'quiz' then (select jsonb_agg(trim(o)) from jsonb_array_elements_text(q->'options') o) end,
-      case when e.type = 'quiz' then (q->>'correctIndex')::int end);
+      case when e.type = 'quiz' then (q->>'correctIndex')::int end,
+      coalesce((q->>'points')::int, 1),
+      nullif(left(trim(coalesce(q->>'reference', '')), 5000), ''));
     idx := idx + 1;
   end loop;
   return get_exam(e.id);
@@ -298,6 +322,102 @@ begin
       from (select * from events where exam_id = e.id and id > coalesce(p_after, 0) order by id limit 500) ev
       join participants p on p.id = ev.participant_id), '[]'::jsonb)
   );
+end $$;
+
+-- Ответы и оценки по каждому студенту.
+-- Тест оценивается автоматически (верный вариант = баллы вопроса),
+-- текстовые ответы — по таблице grades (учитель или ИИ).
+create or replace function public.exam_results(p_exam_id bigint) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  return jsonb_build_object(
+    'exam', _exam_json(e),
+    'questions', _questions_json(e.id, true),
+    'maxScore', (select coalesce(sum(points), 0) from questions where exam_id = e.id),
+    'participants', coalesce((
+      select jsonb_agg(r.row order by r.name) from (
+        select p.name, jsonb_build_object(
+          'id', p.id,
+          'name', p.name,
+          'joinedAt', p.joined_at,
+          'submittedAt', p.submitted_at,
+          'answers', coalesce((
+            select jsonb_object_agg(q.id::text, jsonb_strip_nulls(jsonb_build_object(
+              'value', a.value,
+              'score', case when e.type = 'quiz' then
+                         case when a.value = q.correct_index::text then q.points else 0 end
+                       else g.score end,
+              'comment', g.comment,
+              'source', case when e.type = 'quiz' then 'auto' else g.source end)))
+            from questions q
+            left join answers a on a.question_id = q.id and a.participant_id = p.id
+            left join grades g on g.question_id = q.id and g.participant_id = p.id
+            where q.exam_id = e.id and (a.value is not null or g.score is not null)), '{}'::jsonb),
+          'total', (
+            select sum(case when e.type = 'quiz' then
+                         case when a.value = q.correct_index::text then q.points else 0 end
+                       else g.score end)
+            from questions q
+            left join answers a on a.question_id = q.id and a.participant_id = p.id
+            left join grades g on g.question_id = q.id and g.participant_id = p.id
+            where q.exam_id = e.id),
+          'gradedCount', case when e.type = 'quiz'
+            then (select count(*) from questions q where q.exam_id = e.id)
+            else (select count(*) from grades g join questions q on q.id = g.question_id
+                  where g.participant_id = p.id and q.exam_id = e.id) end
+        ) as row
+        from participants p where p.exam_id = e.id
+      ) r), '[]'::jsonb));
+end $$;
+
+-- Учитель ставит или исправляет оценку текстового ответа.
+create or replace function public.set_grade(p_participant_id bigint, p_question_id bigint, p_score numeric, p_comment text default null)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  p participants;
+  q questions;
+  e exams;
+begin
+  select * into p from participants where id = p_participant_id;
+  if not found then raise exception 'not_found'; end if;
+  e := _own_exam(p.exam_id);
+  select * into q from questions where id = p_question_id and exam_id = e.id;
+  if not found then raise exception 'not_found'; end if;
+  if e.type <> 'text' then raise exception 'not_gradable'; end if;
+  if p_score is null or p_score < 0 or p_score > q.points then raise exception 'invalid_score'; end if;
+  insert into grades (participant_id, question_id, score, comment, source, updated_at)
+  values (p.id, q.id, p_score, nullif(left(trim(coalesce(p_comment, '')), 5000), ''), 'teacher', now())
+  on conflict (participant_id, question_id) do update
+    set score = excluded.score, comment = excluded.comment, source = 'teacher', updated_at = now();
+end $$;
+
+-- Сохраняет оценки ИИ (вызывается из функции supabase/functions/grade).
+-- Оценки, которые учитель поставил сам, ИИ не перезаписывает.
+-- p_grades: [{ "participantId": 1, "questionId": 2, "score": 3.5, "comment": "..." }, ...]
+create or replace function public.save_ai_grades(p_exam_id bigint, p_grades jsonb) returns int
+language plpgsql security definer set search_path = public as $$
+declare
+  e exams := _own_exam(p_exam_id);
+  n int;
+begin
+  if e.type <> 'text' then raise exception 'not_gradable'; end if;
+  if p_grades is null or jsonb_typeof(p_grades) <> 'array' then raise exception 'invalid_grades'; end if;
+  insert into grades (participant_id, question_id, score, comment, source, updated_at)
+  select p.id, q.id,
+         trim_scale(greatest(0, least(q.points, round((g->>'score')::numeric * 2) / 2))),
+         nullif(left(trim(coalesce(g->>'comment', '')), 5000), ''),
+         'ai', now()
+  from jsonb_array_elements(p_grades) g
+  join participants p on p.id = (g->>'participantId')::bigint and p.exam_id = e.id
+  join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id
+  where jsonb_typeof(g->'score') = 'number'
+  on conflict (participant_id, question_id) do update
+    set score = excluded.score, comment = excluded.comment, source = 'ai', updated_at = now()
+    where grades.source = 'ai';
+  get diagnostics n = row_count;
+  return n;
 end $$;
 
 -- ---------- Студент (без аккаунта: код + имя) ----------

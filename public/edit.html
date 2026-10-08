@@ -65,7 +65,16 @@
           });
           parts.push(el('p', { class: 'muted' }, '○ = ' + t('correct')));
           parts.push(el('button', { class: 'secondary small', onclick: () => { q.options.push(''); render(); } }, t('add_option')));
+        } else {
+          const ref = el('textarea', { rows: 2, style: 'min-height:60px', placeholder: t('reference_placeholder') });
+          ref.value = q.reference || '';
+          ref.addEventListener('input', () => { q.reference = ref.value; });
+          parts.push(el('label', {}, t('reference')), ref);
         }
+        const points = el('input', { type: 'number', min: 1, max: 100, step: 1, style: 'width:80px' });
+        points.value = q.points || 1;
+        points.addEventListener('input', () => { q.points = Number(points.value); });
+        parts.push(el('label', { class: 'row' }, t('points'), points));
         return el('div', { class: 'question' }, parts);
       }));
     }

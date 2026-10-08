@@ -22,7 +22,8 @@
         <label data-i18n="link"></label>
         <div class="row"><a id="link" target="_blank"></a><button class="secondary small" id="copy-link" data-i18n="copy"></button></div>
       </div>
-      <p><button class="danger small" id="close" hidden data-i18n="close_exam"></button></p>
+      <p class="row"><a class="btn secondary" id="results-link" data-i18n="results"></a>
+        <button class="danger small" id="close" hidden data-i18n="close_exam"></button></p>
     </div>
     <div class="card">
       <h2 data-i18n="participants"></h2>
@@ -39,6 +40,7 @@
   </main>
   <script>
     const id = Number(new URLSearchParams(location.search).get('id'));
+    document.getElementById('results-link').href = 'results.html?id=' + id;
     let lastEventId = 0;
     const events = [];
 

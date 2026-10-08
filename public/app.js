@@ -32,10 +32,19 @@ async function callFunction(name, body) {
   if (!db) throw appError('not_configured');
   const { data, error } = await db.functions.invoke(name, { body });
   if (error) {
-    let code = 'ai_failed';
-    try { code = (await error.context.json()).error || code; } catch {}
-    if (error.name === 'FunctionsFetchError' || error.name === 'FunctionsRelayError') code = 'ai_not_configured';
-    throw appError(I18N.ru['err_' + code] ? code : 'ai_failed');
+    let code = 'ai_failed', detail = '';
+    const status = error.context?.status;
+    try {
+      const body = await error.context.json();
+      code = body.error || code;
+      detail = body.detail || body.message || body.msg || '';
+    } catch {}
+    if (error.name === 'FunctionsFetchError' || error.name === 'FunctionsRelayError' || status === 404) code = 'ai_no_function';
+    // Шлюз Supabase с включённым Verify JWT отвечает 401 без нашего кода ошибки.
+    else if (status === 401 && code === 'ai_failed') code = 'ai_jwt';
+    const err = appError(I18N.ru['err_' + code] ? code : 'ai_failed');
+    if (detail) err.message += ' (' + detail + ')';
+    throw err;
   }
   return data;
 }

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+</head>
+<body>
+  <header><div class="wrap"><a class="brand" href="index.html" data-i18n="app_name"></a><a href="teacher.html" data-i18n="teacher_login"></a></div></header>
+  <main class="wrap narrow">
+    <div class="card">
+      <p class="muted" data-i18n="student_intro"></p>
+      <form id="code-form">
+        <label for="code" data-i18n="enter_code"></label>
+        <input type="text" id="code" autocomplete="off" style="text-transform:uppercase" required>
+        <div class="error" id="err"></div>
+        <button type="submit" data-i18n="go"></button>
+      </form>
+    </div>
+  </main>
+  <script>
+    document.getElementById('code-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = document.getElementById('code').value.trim().toUpperCase();
+      try {
+        await rpc('exam_by_code', { p_code: code });
+        location.href = examLink(code);
+      } catch (err) { document.getElementById('err').textContent = err.message; }
+    });
+  </script>
+</body>
+</html>

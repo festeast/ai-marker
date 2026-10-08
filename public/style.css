@@ -1,0 +1,57 @@
+:root {
+  --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
+  --accent: #2557d6; --accent-ink: #fff; --ok: #1f8a4c; --warn: #b7791f; --bad: #c53030;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+header { background: var(--card); border-bottom: 1px solid var(--line); }
+header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; padding-bottom: 12px; }
+header a.brand { font-weight: 700; color: var(--text); text-decoration: none; }
+.wrap { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+main.wrap { padding-top: 24px; padding-bottom: 48px; }
+.narrow { max-width: 440px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+h1 { font-size: 24px; margin: 0 0 16px; }
+h2 { font-size: 18px; margin: 0 0 12px; }
+label { display: block; font-size: 14px; color: var(--muted); margin: 12px 0 4px; }
+input[type=text], input[type=email], input[type=password], textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: #fff;
+}
+textarea { min-height: 120px; resize: vertical; }
+button, .btn {
+  display: inline-block; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--accent);
+  background: var(--accent); color: var(--accent-ink); font: inherit; cursor: pointer; text-decoration: none;
+}
+button.secondary, .btn.secondary { background: #fff; color: var(--accent); }
+button.danger { background: #fff; color: var(--bad); border-color: var(--bad); }
+button.small { padding: 4px 10px; font-size: 14px; }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spread { justify-content: space-between; }
+.muted { color: var(--muted); font-size: 14px; }
+.error { color: var(--bad); margin-top: 12px; min-height: 1.5em; }
+.ok { color: var(--ok); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 13px; background: var(--line); }
+.badge.published, .badge.online, .badge.submitted { background: #dcf3e5; color: var(--ok); }
+.badge.away { background: #fdecc8; color: var(--warn); }
+.badge.offline { background: #eceef2; color: var(--muted); }
+.badge.flag { background: #fde2e2; color: var(--bad); }
+.type-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.type-choice label { margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; cursor: pointer; color: var(--text); }
+.type-choice input { margin-right: 6px; }
+.question { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.option { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.option input[type=text] { flex: 1; }
+.code-box { font: 700 36px/1.2 ui-monospace, monospace; letter-spacing: 4px; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 13px; }
+tr.flagged td { background: #fff7f7; }
+.table-scroll { overflow-x: auto; }
+.events { list-style: none; padding: 0; margin: 0; max-height: 420px; overflow-y: auto; font-size: 14px; }
+.events li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.events li.flag { color: var(--bad); }
+.snippet { display: block; margin-top: 4px; padding: 6px 8px; background: var(--bg); border-radius: 6px; color: var(--text); white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto; }
+.choice { display: block; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; color: var(--text); cursor: pointer; }
+.notice { background: #eef3ff; border: 1px solid #c9d7fb; border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 16px; }
+@media (max-width: 600px) { .type-choice { grid-template-columns: 1fr; } }

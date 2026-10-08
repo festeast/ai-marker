@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Мои экзамены — AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <h2 data-i18n="new_exam"></h2>
+      <form id="new-exam">
+        <label for="title" data-i18n="exam_title"></label>
+        <input type="text" id="title" required>
+        <div class="type-choice">
+          <label><input type="radio" name="type" value="quiz" checked><b data-i18n="type_quiz"></b><br><span class="muted" data-i18n="type_quiz_hint"></span></label>
+          <label><input type="radio" name="type" value="text"><b data-i18n="type_text"></b><br><span class="muted" data-i18n="type_text_hint"></span></label>
+        </div>
+        <div class="error" id="err"></div>
+        <button type="submit" data-i18n="create"></button>
+      </form>
+    </div>
+    <div class="card">
+      <h2 data-i18n="my_exams"></h2>
+      <div id="list"></div>
+    </div>
+  </main>
+  <script>
+    async function load() {
+      const exams = await rpc('list_exams');
+      const list = document.getElementById('list');
+      list.replaceChildren();
+      if (!exams.length) { list.append(el('p', { class: 'muted' }, t('no_exams'))); return; }
+      const rows = exams.map((x) => el('tr', {},
+        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'))),
+        el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
+        el('td', {}, x.code ? el('code', {}, x.code) : '—'),
+        el('td', {}, `${t('participants')}: ${x.participantCount}`),
+        el('td', {}, x.status === 'draft'
+          ? el('a', { href: 'edit.html?id=' + x.id }, t('open'))
+          : el('a', { href: 'monitor.html?id=' + x.id }, t('monitor'))),
+      ));
+      list.append(el('div', { class: 'table-scroll' }, el('table', {}, el('tbody', {}, rows))));
+    }
+    document.getElementById('new-exam').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const exam = await rpc('create_exam', {
+          p_title: document.getElementById('title').value,
+          p_type: document.querySelector('input[name=type]:checked').value,
+        });
+        location.href = 'edit.html?id=' + exam.id;
+      } catch (err) { document.getElementById('err').textContent = err.message; }
+    });
+    requireLogin().then(load).catch((err) => { document.getElementById('err').textContent = err.message; });
+  </script>
+</body>
+</html>

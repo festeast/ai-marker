@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход — AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+</head>
+<body>
+  <header><div class="wrap"><a class="brand" href="index.html" data-i18n="app_name"></a></div></header>
+  <main class="wrap narrow">
+    <div class="card">
+      <h1 id="heading"></h1>
+      <form id="form">
+        <div id="name-field" hidden>
+          <label for="name" data-i18n="name"></label><input type="text" id="name" autocomplete="name">
+        </div>
+        <label for="email" data-i18n="email"></label><input type="email" id="email" autocomplete="email" required>
+        <label for="password" data-i18n="password"></label><input type="password" id="password" required>
+        <div class="error" id="err"></div>
+        <button type="submit" id="submit"></button>
+      </form>
+      <p class="muted"><span id="switch-text"></span> <a href="#" id="switch"></a></p>
+    </div>
+  </main>
+  <script>
+    let mode = location.hash === '#register' ? 'register' : 'login';
+    function render() {
+      document.getElementById('heading').textContent = t(mode === 'login' ? 'login' : 'register');
+      document.getElementById('submit').textContent = t(mode === 'login' ? 'login' : 'register');
+      document.getElementById('name-field').hidden = mode === 'login';
+      document.getElementById('switch-text').textContent = t(mode === 'login' ? 'no_account' : 'have_account');
+      document.getElementById('switch').textContent = t(mode === 'login' ? 'register' : 'login');
+      document.getElementById('err').textContent = '';
+    }
+    document.getElementById('switch').addEventListener('click', (e) => {
+      e.preventDefault(); mode = mode === 'login' ? 'register' : 'login'; render();
+    });
+    document.getElementById('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('err');
+      err.textContent = '';
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const name = document.getElementById('name').value.trim();
+      try {
+        if (!db) throw appError('not_configured');
+        if (mode === 'register') {
+          if (!name) throw appError('name_required');
+          if (password.length < 8) throw appError('password_too_short');
+          const { data, error } = await db.auth.signUp({
+            email, password, options: { data: { name }, emailRedirectTo: pageUrl('teacher.html') },
+          });
+          if (error) throw appError(authErrorCode(error));
+          // Если в Supabase включено подтверждение email, сессии ещё нет.
+          if (!data.session) { err.className = 'ok'; err.textContent = t('check_email'); return; }
+        } else {
+          const { error } = await db.auth.signInWithPassword({ email, password });
+          if (error) throw appError(authErrorCode(error));
+        }
+        location.href = 'teacher.html';
+      } catch (e2) { err.className = 'error'; err.textContent = e2.message; }
+    });
+    render();
+  </script>
+</body>
+</html>

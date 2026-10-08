@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Редактор — AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <p><a href="teacher.html" data-i18n="back"></a></p>
+    <div class="card">
+      <label for="title" data-i18n="exam_title"></label>
+      <input type="text" id="title">
+      <p class="muted" id="type"></p>
+    </div>
+    <div class="card">
+      <h2 data-i18n="questions"></h2>
+      <div id="questions"></div>
+      <button class="secondary" id="add" data-i18n="add_question"></button>
+    </div>
+    <div class="row">
+      <button class="secondary" id="save" data-i18n="save"></button>
+      <button id="publish" data-i18n="confirm_publish"></button>
+      <button class="danger" id="delete" data-i18n="delete_exam"></button>
+      <span id="msg"></span>
+    </div>
+    <div class="error" id="err"></div>
+  </main>
+  <script>
+    const id = Number(new URLSearchParams(location.search).get('id'));
+    let exam;
+
+    function blankQuestion() {
+      return exam.type === 'quiz' ? { text: '', options: ['', ''], correctIndex: 0 } : { text: '' };
+    }
+
+    function render() {
+      const box = document.getElementById('questions');
+      box.replaceChildren(...exam.questions.map((q, i) => {
+        const text = el('textarea', { rows: 2, style: 'min-height:60px' });
+        text.value = q.text;
+        text.addEventListener('input', () => { q.text = text.value; });
+        const parts = [
+          el('div', { class: 'row spread' }, el('b', {}, `${t('question')} ${i + 1}`),
+            el('button', { class: 'danger small', onclick: () => { exam.questions.splice(i, 1); render(); } }, t('remove'))),
+          text,
+        ];
+        if (exam.type === 'quiz') {
+          q.options.forEach((opt, j) => {
+            const input = el('input', { type: 'text', placeholder: `${t('option')} ${j + 1}` });
+            input.value = opt;
+            input.addEventListener('input', () => { q.options[j] = input.value; });
+            const radio = el('input', { type: 'radio', name: 'correct-' + i, title: t('correct') });
+            radio.checked = q.correctIndex === j;
+            radio.addEventListener('change', () => { q.correctIndex = j; });
+            parts.push(el('div', { class: 'option' }, radio, input,
+              q.options.length > 2 ? el('button', { class: 'secondary small', onclick: () => {
+                q.options.splice(j, 1);
+                if (q.correctIndex >= q.options.length) q.correctIndex = 0;
+                render();
+              } }, '×') : null));
+          });
+          parts.push(el('p', { class: 'muted' }, '○ = ' + t('correct')));
+          parts.push(el('button', { class: 'secondary small', onclick: () => { q.options.push(''); render(); } }, t('add_option')));
+        }
+        return el('div', { class: 'question' }, parts);
+      }));
+    }
+
+    async function save() {
+      document.getElementById('err').textContent = '';
+      exam.title = document.getElementById('title').value;
+      const saved = await rpc('save_exam', { p_exam_id: id, p_title: exam.title, p_questions: exam.questions });
+      exam.questions = saved.questions;
+      render();
+    }
+
+    function withErrors(fn) {
+      return async () => {
+        try { await fn(); } catch (err) { document.getElementById('err').textContent = err.message; }
+      };
+    }
+
+    document.getElementById('add').addEventListener('click', () => { exam.questions.push(blankQuestion()); render(); });
+    document.getElementById('save').addEventListener('click', withErrors(async () => {
+      await save();
+      const msg = document.getElementById('msg');
+      msg.textContent = t('saved'); msg.className = 'ok';
+      setTimeout(() => { msg.textContent = ''; }, 2000);
+    }));
+    document.getElementById('publish').addEventListener('click', withErrors(async () => {
+      await save();
+      if (!exam.questions.length) throw new Error(t('err_no_questions'));
+      if (!confirm(t('confirm_publish_q'))) return;
+      await rpc('publish_exam', { p_exam_id: id });
+      location.href = 'monitor.html?id=' + id;
+    }));
+    document.getElementById('delete').addEventListener('click', withErrors(async () => {
+      if (!confirm(t('delete_exam_q'))) return;
+      await rpc('delete_exam', { p_exam_id: id });
+      location.href = 'teacher.html';
+    }));
+
+    requireLogin().then(async () => {
+      exam = await rpc('get_exam', { p_exam_id: id });
+      if (exam.status !== 'draft') { location.href = 'monitor.html?id=' + id; return; }
+      document.getElementById('title').value = exam.title;
+      document.getElementById('type').textContent = t(exam.type === 'quiz' ? 'type_quiz' : 'type_text');
+      if (!exam.questions.length) exam.questions.push(blankQuestion());
+      render();
+    }).catch(showPageError);
+  </script>
+</body>
+</html>

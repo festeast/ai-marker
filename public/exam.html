@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Экзамен — AI Marker</title>
+  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script>
+</head>
+<body>
+  <header><div class="wrap"><span class="brand" data-i18n="app_name"></span><span class="muted" id="who"></span></div></header>
+  <main class="wrap" style="max-width:760px">
+    <h1 id="title"></h1>
+    <div class="card narrow" id="join" hidden>
+      <form id="join-form">
+        <label for="name" data-i18n="your_name"></label>
+        <input type="text" id="name" autocomplete="name" required>
+        <p class="muted" data-i18n="monitor_notice"></p>
+        <button type="submit" data-i18n="start"></button>
+      </form>
+    </div>
+    <div id="attempt" hidden>
+      <div class="notice" data-i18n="monitor_notice"></div>
+      <div id="questions"></div>
+      <div class="row spread">
+        <span class="muted" id="save-state" data-i18n="autosaved"></span>
+        <button id="submit" data-i18n="submit"></button>
+      </div>
+    </div>
+    <div class="card" id="done" hidden><p class="ok" data-i18n="submitted_msg"></p></div>
+    <div class="error" id="err"></div>
+  </main>
+  <script>
+    const code = decodeURIComponent(location.pathname.split('/').pop()).toUpperCase();
+    const storeKey = 'attempt:' + code;
+    let token = null;
+    try { token = localStorage.getItem(storeKey); } catch {}
+    const answers = {};
+    let finished = false;
+
+    const showError = (err) => { document.getElementById('err').textContent = err.message; };
+    const attemptApi = (method, url, body) => api(method, url, body, { 'X-Attempt-Token': token });
+
+    // ---------- отслеживание: уход со страницы и вставки ----------
+    let away = false, awaySince = 0, suppress = false;
+
+    function sendEvent(body) {
+      if (finished) return;
+      attemptApi('POST', '/api/public/attempt/events', body).catch(() => {});
+    }
+    function markAway(reason) {
+      if (away || suppress || finished) return;
+      away = true; awaySince = Date.now();
+      sendEvent({ type: 'leave', reason });
+    }
+    function markBack() {
+      if (!away || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+      away = false;
+      sendEvent({ type: 'return', awayMs: Date.now() - awaySince });
+    }
+    function startTracking() {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') markAway('hidden'); else markBack();
+      });
+      window.addEventListener('blur', () => markAway('blur'));
+      window.addEventListener('focus', markBack);
+      window.addEventListener('pagehide', () => {
+        if (finished) return;
+        navigator.sendBeacon('/api/public/attempt/events', JSON.stringify({ token, type: 'leave', reason: 'close' }));
+      });
+      document.addEventListener('paste', (e) => {
+        const text = (e.clipboardData && e.clipboardData.getData('text')) || '';
+        const q = e.target.closest && e.target.closest('[data-qid]');
+        sendEvent({ type: 'paste', length: text.length, text, questionId: q ? Number(q.dataset.qid) : null });
+      });
+      document.addEventListener('drop', (e) => {
+        const text = (e.dataTransfer && e.dataTransfer.getData('text')) || '';
+        if (!text) return;
+        const q = e.target.closest && e.target.closest('[data-qid]');
+        sendEvent({ type: 'paste', length: text.length, text, questionId: q ? Number(q.dataset.qid) : null });
+      });
+      setInterval(() => { if (!finished) attemptApi('POST', '/api/public/attempt/heartbeat').catch(() => {}); }, 10000);
+    }
+
+    // ---------- ответы ----------
+    let saveTimer = null;
+    function scheduleSave() {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => attemptApi('POST', '/api/public/attempt/answers', { answers }).catch(showError), 800);
+    }
+
+    function renderQuestions(data) {
+      const box = document.getElementById('questions');
+      box.replaceChildren(...data.questions.map((q, i) => {
+        const parts = [el('h2', {}, `${i + 1}. `, q.text)];
+        if (data.exam.type === 'quiz') {
+          q.options.forEach((opt, j) => {
+            const radio = el('input', { type: 'radio', name: 'q' + q.id, value: String(j) });
+            radio.checked = answers[q.id] === String(j);
+            radio.addEventListener('change', () => { answers[q.id] = String(j); scheduleSave(); });
+            parts.push(el('label', { class: 'choice' }, radio, ' ', opt));
+          });
+        } else {
+          const area = el('textarea', { placeholder: t('answer_placeholder') });
+          area.value = answers[q.id] || '';
+          area.addEventListener('input', () => { answers[q.id] = area.value; scheduleSave(); });
+          parts.push(area);
+        }
+        return el('div', { class: 'card', 'data-qid': q.id }, parts);
+      }));
+    }
+
+    function showDone() {
+      finished = true;
+      document.getElementById('attempt').hidden = true;
+      document.getElementById('join').hidden = true;
+      document.getElementById('done').hidden = false;
+    }
+
+    async function loadAttempt() {
+      const data = await attemptApi('GET', '/api/public/attempt');
+      document.getElementById('who').textContent = data.name;
+      Object.assign(answers, data.answers);
+      if (data.submitted) return showDone();
+      if (data.exam.status !== 'published') throw new Error(t('err_exam_not_open'));
+      renderQuestions(data);
+      document.getElementById('attempt').hidden = false;
+      startTracking();
+    }
+
+    document.getElementById('join-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const res = await api('POST', `/api/public/exams/${encodeURIComponent(code)}/join`, { name: document.getElementById('name').value });
+        token = res.token;
+        try { localStorage.setItem(storeKey, token); } catch {}
+        document.getElementById('join').hidden = true;
+        await loadAttempt();
+      } catch (err) { showError(err); }
+    });
+
+    document.getElementById('submit').addEventListener('click', async () => {
+      suppress = true; // диалог подтверждения снимает фокус — это не уход
+      const ok = confirm(t('submit_q'));
+      suppress = false;
+      if (!ok) return;
+      try {
+        clearTimeout(saveTimer);
+        await attemptApi('POST', '/api/public/attempt/submit', { answers });
+        showDone();
+      } catch (err) { showError(err); }
+    });
+
+    (async () => {
+      try {
+        const exam = await api('GET', '/api/public/exams/' + encodeURIComponent(code));
+        document.getElementById('title').textContent = exam.title;
+        document.title = exam.title + ' — AI Marker';
+        if (token) {
+          try { return await loadAttempt(); } catch (err) {
+            if (err.status !== 401) throw err;
+            token = null;
+          }
+        }
+        if (exam.status !== 'published') throw new Error(t('err_exam_not_open'));
+        document.getElementById('join').hidden = false;
+      } catch (err) { showError(err); }
+    })();
+  </script>
+</body>
+</html>

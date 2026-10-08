@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход — AI Marker</title>
+  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script>
+</head>
+<body>
+  <header><div class="wrap"><a class="brand" href="/" data-i18n="app_name"></a></div></header>
+  <main class="wrap narrow">
+    <div class="card">
+      <h1 id="heading"></h1>
+      <form id="form">
+        <div id="name-field" hidden>
+          <label for="name" data-i18n="name"></label><input type="text" id="name" autocomplete="name">
+        </div>
+        <label for="email" data-i18n="email"></label><input type="email" id="email" autocomplete="email" required>
+        <label for="password" data-i18n="password"></label><input type="password" id="password" required>
+        <div class="error" id="err"></div>
+        <button type="submit" id="submit"></button>
+      </form>
+      <p class="muted"><span id="switch-text"></span> <a href="#" id="switch"></a></p>
+    </div>
+  </main>
+  <script>
+    let mode = location.hash === '#register' ? 'register' : 'login';
+    function render() {
+      document.getElementById('heading').textContent = t(mode === 'login' ? 'login' : 'register');
+      document.getElementById('submit').textContent = t(mode === 'login' ? 'login' : 'register');
+      document.getElementById('name-field').hidden = mode === 'login';
+      document.getElementById('switch-text').textContent = t(mode === 'login' ? 'no_account' : 'have_account');
+      document.getElementById('switch').textContent = t(mode === 'login' ? 'register' : 'login');
+      document.getElementById('err').textContent = '';
+    }
+    document.getElementById('switch').addEventListener('click', (e) => {
+      e.preventDefault(); mode = mode === 'login' ? 'register' : 'login'; render();
+    });
+    document.getElementById('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = {
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
+        name: document.getElementById('name').value,
+      };
+      try {
+        await api('POST', '/api/auth/' + mode, body);
+        location.href = '/teacher';
+      } catch (err) { document.getElementById('err').textContent = err.message; }
+    });
+    render();
+  </script>
+</body>
+</html>

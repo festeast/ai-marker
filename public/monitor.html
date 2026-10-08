@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Мониторинг — AI Marker</title>
+  <link rel="stylesheet" href="/style.css"><script src="/i18n.js"></script><script src="/teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <p><a href="/teacher" data-i18n="back"></a></p>
+    <div class="card">
+      <div class="row spread">
+        <h1 id="title" style="margin:0"></h1>
+        <span class="badge" id="status"></span>
+      </div>
+      <div id="share" hidden>
+        <label data-i18n="code"></label>
+        <div class="row"><span class="code-box" id="code"></span><button class="secondary small" id="copy-code" data-i18n="copy"></button></div>
+        <label data-i18n="link"></label>
+        <div class="row"><a id="link" target="_blank"></a><button class="secondary small" id="copy-link" data-i18n="copy"></button></div>
+      </div>
+      <p><button class="danger small" id="close" hidden data-i18n="close_exam"></button></p>
+    </div>
+    <div class="card">
+      <h2 data-i18n="participants"></h2>
+      <div id="participants"></div>
+    </div>
+    <div class="card">
+      <div class="row spread">
+        <h2 data-i18n="events"></h2>
+        <label class="muted" style="margin:0"><input type="checkbox" id="only-flagged"> <span data-i18n="only_flagged"></span></label>
+      </div>
+      <ul class="events" id="events"></ul>
+    </div>
+  </main>
+  <script>
+    const id = new URLSearchParams(location.search).get('id');
+    let lastEventId = 0;
+    const events = [];
+
+    function copy(text, btn) {
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = t('copied');
+        setTimeout(() => { btn.textContent = t('copy'); }, 1500);
+      });
+    }
+
+    function isFlagged(e) {
+      return e.type === 'leave' || (e.type === 'paste' && e.detail && e.detail.large);
+    }
+
+    function eventText(e) {
+      const d = e.detail || {};
+      switch (e.type) {
+        case 'join': return t('ev_join');
+        case 'leave': return d.reason === 'close' ? t('ev_leave_close') : t('ev_leave');
+        case 'return': return `${t('ev_return')} ${fmtDuration(d.awayMs || 0)}`;
+        case 'paste': return `${t('ev_paste')}: ${d.length} ${t('chars')}${d.large ? ' — ' + t('large') : ''}`;
+        case 'submit': return t('ev_submit');
+        default: return e.type;
+      }
+    }
+
+    function renderEvents() {
+      const onlyFlagged = document.getElementById('only-flagged').checked;
+      const list = events.filter((e) => !onlyFlagged || isFlagged(e)).slice().reverse();
+      document.getElementById('events').replaceChildren(...list.map((e) => el('li', { class: isFlagged(e) ? 'flag' : '' },
+        el('span', { class: 'muted' }, fmtTime(e.createdAt) + ' '), el('b', {}, e.name), ' — ', eventText(e),
+        e.type === 'paste' && e.detail && e.detail.snippet ? el('span', { class: 'snippet' }, e.detail.snippet) : null,
+      )));
+    }
+
+    function renderParticipants(data) {
+      const box = document.getElementById('participants');
+      if (!data.participants.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_participants'))); return; }
+      const isQuiz = data.exam.type === 'quiz';
+      const head = el('tr', {}, ['col_student', 'col_status', 'col_left', 'col_away', 'col_pastes', 'col_answered']
+        .concat(isQuiz ? ['col_score'] : []).map((k) => el('th', {}, t(k))));
+      const rows = data.participants.map((p) => el('tr', { class: p.leaveCount || p.largePasteCount ? 'flagged' : '' },
+        el('td', {}, el('b', {}, p.name), el('br'), el('span', { class: 'muted' }, fmtTime(p.joinedAt))),
+        el('td', {}, el('span', { class: 'badge ' + p.status }, t('st_' + p.status))),
+        el('td', {}, p.leaveCount ? el('span', { class: 'badge flag' }, String(p.leaveCount)) : '0'),
+        el('td', {}, p.awayMs ? fmtDuration(p.awayMs) : '—'),
+        el('td', {}, p.largePasteCount ? el('span', { class: 'badge flag' }, String(p.largePasteCount)) : '0'),
+        el('td', {}, `${p.answeredCount} / ${data.questionCount}`),
+        isQuiz ? el('td', {}, p.score ? `${p.score.correct} / ${p.score.total}` : '—') : null,
+      ));
+      box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
+    }
+
+    async function poll() {
+      try {
+        const data = await api('GET', `/api/exams/${id}/monitor?after=${lastEventId}`);
+        const x = data.exam;
+        document.getElementById('title').textContent = x.title;
+        const status = document.getElementById('status');
+        status.textContent = t('status_' + x.status); status.className = 'badge ' + x.status;
+        if (x.status === 'draft') { location.href = '/edit?id=' + id; return; }
+        document.getElementById('share').hidden = x.status !== 'published';
+        document.getElementById('close').hidden = x.status !== 'published';
+        document.getElementById('code').textContent = x.code;
+        const link = document.getElementById('link');
+        link.textContent = link.href = examLink(x.code);
+        renderParticipants(data);
+        if (data.events.length) {
+          events.push(...data.events);
+          lastEventId = data.events[data.events.length - 1].id;
+          renderEvents();
+        }
+      } finally {
+        setTimeout(poll, 3000);
+      }
+    }
+
+    document.getElementById('copy-code').addEventListener('click', (e) => copy(document.getElementById('code').textContent, e.target));
+    document.getElementById('copy-link').addEventListener('click', (e) => copy(document.getElementById('link').href, e.target));
+    document.getElementById('only-flagged').addEventListener('change', renderEvents);
+    document.getElementById('close').addEventListener('click', async () => {
+      if (!confirm(t('close_exam_q'))) return;
+      await api('POST', `/api/exams/${id}/close`);
+    });
+
+    requireLogin().then(poll);
+  </script>
+</body>
+</html>

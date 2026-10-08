@@ -20,6 +20,19 @@ async function rpc(fn, args = {}) {
   return data;
 }
 
+// Вызов функции Supabase (supabase/functions/<name>). Ошибки — те же коды.
+async function callFunction(name, body) {
+  if (!db) throw appError('not_configured');
+  const { data, error } = await db.functions.invoke(name, { body });
+  if (error) {
+    let code = 'ai_failed';
+    try { code = (await error.context.json()).error || code; } catch {}
+    if (error.name === 'FunctionsFetchError' || error.name === 'FunctionsRelayError') code = 'ai_not_configured';
+    throw appError(I18N.ru['err_' + code] ? code : 'ai_failed');
+  }
+  return data;
+}
+
 // Ошибки входа Supabase Auth → наши коды.
 function authErrorCode(error) {
   const map = {

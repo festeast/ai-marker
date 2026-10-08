@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ответы и оценки — AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <p class="row"><a href="teacher.html" data-i18n="back"></a> · <a id="monitor-link" data-i18n="monitor"></a></p>
+    <div class="card">
+      <h1 id="title" style="margin:0 0 12px"></h1>
+      <div id="summary"></div>
+      <div id="ai-box" hidden style="margin-top:16px">
+        <div class="row"><button id="ai-all" data-i18n="ai_grade_all"></button><span id="ai-msg" class="muted"></span></div>
+        <p class="muted" data-i18n="ai_hint"></p>
+      </div>
+    </div>
+    <div id="students"></div>
+    <div class="error" id="err"></div>
+  </main>
+  <script>
+    const id = Number(new URLSearchParams(location.search).get('id'));
+    document.getElementById('monitor-link').href = 'monitor.html?id=' + id;
+    let data;
+
+    function fmtScore(n) {
+      return n === null || n === undefined ? '—' : String(Math.round(Number(n) * 100) / 100);
+    }
+
+    function sourceLabel(source) {
+      return source ? t('by_' + source) : '';
+    }
+
+    function renderSummary() {
+      const box = document.getElementById('summary');
+      if (!data.participants.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_results'))); return; }
+      const qn = data.questions.length;
+      const head = el('tr', {}, [t('col_student'), t('col_status'), t('total'), t('graded')].map((h) => el('th', {}, h)));
+      const rows = data.participants.map((p) => el('tr', {},
+        el('td', {}, el('a', { href: '#p' + p.id }, p.name)),
+        el('td', {}, p.submittedAt ? el('span', { class: 'badge submitted' }, t('st_submitted')) : el('span', { class: 'muted' }, t('not_submitted'))),
+        el('td', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`),
+        el('td', {}, `${p.gradedCount} / ${qn}`),
+      ));
+      box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
+    }
+
+    function gradeForm(p, q, a) {
+      const score = el('input', { type: 'number', min: 0, max: q.points, step: 0.5, style: 'width:90px' });
+      if (a.score !== undefined) score.value = a.score;
+      const comment = el('input', { type: 'text', placeholder: t('comment_placeholder') });
+      comment.value = a.comment || '';
+      const msg = el('span', { class: 'muted' }, sourceLabel(a.source));
+      const save = el('button', { class: 'small', onclick: async () => {
+        msg.className = 'muted'; msg.textContent = '';
+        try {
+          if (score.value === '') throw appError('invalid_score');
+          await rpc('set_grade', { p_participant_id: p.id, p_question_id: q.id, p_score: Number(score.value), p_comment: comment.value });
+          await load();
+        } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
+      } }, t('save'));
+      return el('div', {},
+        el('div', { class: 'row', style: 'margin-top:8px' }, el('span', {}, t('score') + ':'), score, el('span', { class: 'muted' }, `${t('of')} ${q.points}`), save, msg),
+        el('div', { style: 'margin-top:6px' }, comment));
+    }
+
+    function renderStudents() {
+      const isQuiz = data.exam.type === 'quiz';
+      document.getElementById('students').replaceChildren(...data.participants.map((p) => {
+        const items = data.questions.map((q, i) => {
+          const a = p.answers[q.id] || {};
+          const parts = [el('div', { class: 'row spread' },
+            el('b', {}, `${i + 1}. ${q.text}`),
+            el('span', { class: 'muted' }, `${fmtScore(a.score)} / ${q.points}`))];
+          if (isQuiz) {
+            const chosen = a.value !== undefined ? q.options[Number(a.value)] : null;
+            const ok = a.value === String(q.correctIndex);
+            parts.push(el('p', {}, `${t('answer')}: `, chosen === null ? el('span', { class: 'muted' }, t('no_answer')) : el('span', { class: ok ? 'ok' : 'error' }, (ok ? '✓ ' : '✗ ') + chosen)));
+            if (!ok) parts.push(el('p', { class: 'muted' }, `${t('correct_answer')}: ${q.options[q.correctIndex]}`));
+          } else {
+            parts.push(a.value ? el('span', { class: 'snippet' }, a.value) : el('p', { class: 'muted' }, t('no_answer')));
+            if (q.reference) parts.push(el('p', { class: 'muted' }, `${t('reference')}: ${q.reference}`));
+            parts.push(gradeForm(p, q, a));
+          }
+          return el('div', { class: 'question' }, parts);
+        });
+        const aiOne = !isQuiz && p.submittedAt ? el('button', { class: 'secondary small', onclick: (e) => gradeWithAi([p], e.target) }, t('ai_grade_one')) : null;
+        return el('div', { class: 'card', id: 'p' + p.id },
+          el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, p.name),
+            el('span', { class: 'row' }, aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
+          items);
+      }));
+    }
+
+    // ИИ оценивает студентов по одному, чтобы каждый запрос был коротким.
+    let aiRunning = false;
+    async function gradeWithAi(students, button) {
+      if (aiRunning) return;
+      aiRunning = true;
+      const msg = document.getElementById('ai-msg');
+      msg.className = 'muted';
+      document.querySelectorAll('#ai-all, #students button').forEach((b) => { b.disabled = true; });
+      try {
+        for (let i = 0; i < students.length; i++) {
+          msg.textContent = `${t('ai_grading')}: ${students[i].name} (${i + 1} / ${students.length})…`;
+          await callFunction('grade', { examId: id, participantId: students[i].id });
+        }
+        msg.className = 'ok';
+        msg.textContent = t('ai_done');
+      } catch (err) {
+        msg.className = 'error';
+        msg.textContent = err.message;
+      } finally {
+        aiRunning = false;
+        await load().catch(showPageError);
+        document.getElementById('ai-all').disabled = false;
+        if (button) document.getElementById('ai-box').scrollIntoView({ block: 'nearest' });
+      }
+    }
+
+    document.getElementById('ai-all').addEventListener('click', () => {
+      gradeWithAi(data.participants.filter((p) => p.submittedAt));
+    });
+
+    async function load() {
+      data = await rpc('exam_results', { p_exam_id: id });
+      document.getElementById('title').textContent = data.exam.title;
+      document.title = data.exam.title + ' — ' + t('results');
+      renderSummary();
+      renderStudents();
+      document.getElementById('ai-box').hidden = data.exam.type !== 'text' || !data.participants.some((p) => p.submittedAt);
+    }
+
+    requireLogin().then(load).catch(showPageError);
+  </script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 // Общее для страниц учителя: проверка входа и шапка.
 async function requireLogin() {
+  ensureHeader();
   if (!db) throw appError('not_configured');
   const { data } = await db.auth.getSession();
   if (!data.session) {
@@ -16,13 +17,16 @@ function teacherHeader() {
     <span class="row"><span class="muted" id="me"></span><button class="secondary small" id="logout">${t('logout')}</button></span></div></header>`;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function ensureHeader() {
+  if (document.getElementById('me')) return;
   document.body.insertAdjacentHTML('afterbegin', teacherHeader());
   document.getElementById('logout').addEventListener('click', async () => {
     if (db) await db.auth.signOut().catch(() => {});
     location.href = 'login.html';
   });
-});
+}
+
+document.addEventListener('DOMContentLoaded', ensureHeader);
 
 // Ошибки загрузки страницы показываем в #err.
 function showPageError(err) {

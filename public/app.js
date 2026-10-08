@@ -47,7 +47,6 @@ function rpcKeepalive(fn, args) {
     headers: {
       'Content-Type': 'application/json',
       apikey: CONFIG.supabaseAnonKey,
-      Authorization: `Bearer ${CONFIG.supabaseAnonKey}`,
     },
     body: JSON.stringify(args),
   }).catch(() => {});

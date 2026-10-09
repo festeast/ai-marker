@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Профиль — AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <h1 id="name" style="margin:0"></h1>
+      <p class="muted" id="who" style="margin:4px 0 0"></p>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="card">
+      <h2 data-i18n="class_analysis"></h2>
+      <p class="muted" data-i18n="class_analysis_hint"></p>
+      <div id="classes"></div>
+    </div>
+    <div class="card">
+      <h2 data-i18n="exam_history"></h2>
+      <div id="exams"></div>
+    </div>
+    <div class="error" id="err"></div>
+  </main>
+  <script>
+    const stat = (num, label, cls) => el('div', { class: 'stat' }, el('div', { class: 'num ' + (cls || '') }, String(num)), el('div', { class: 'muted' }, label));
+    const pctCell = (p) => el('td', { class: pctClass(p) }, fmtPct(p), p !== null && p !== undefined ? el('span', { class: 'muted' }, ` «${gradeFor(p)}»`) : null);
+
+    function renderClasses(classes) {
+      const box = document.getElementById('classes');
+      if (!classes.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_exams'))); return; }
+      box.replaceChildren(...classes.map((c) => {
+        const students = c.studentList || [];
+        const table = students.length
+          ? el('div', { class: 'table-scroll' }, el('table', {},
+              el('thead', {}, el('tr', {}, [t('col_student'), t('exams_taken'), t('avg_result'), t('last_result')].map((h) => el('th', {}, h)))),
+              el('tbody', {}, students.map((s) => el('tr', {},
+                el('td', {}, s.name), el('td', {}, String(s.exams)), pctCell(s.avgPercent), pctCell(s.lastPercent))))))
+          : el('p', { class: 'muted' }, t('no_results'));
+        const weak = students.filter((s) => s.avgPercent !== null && s.avgPercent < 40);
+        return el('details', { class: 'material', open: classes.length === 1 },
+          el('summary', {}, el('b', {}, c.className || t('no_class')), el('span', { class: 'muted' },
+            ` · ${t('exams_count')}: ${c.exams} · ${t('students_count')}: ${c.students} · ${t('avg_result')}: `),
+            el('b', { class: pctClass(c.avgPercent) }, fmtPct(c.avgPercent))),
+          weak.length ? el('p', {}, el('b', {}, t('need_help') + ': '), weak.map((s) => `${s.name} (${fmtPct(s.avgPercent)})`).join(', ')) : null,
+          table);
+      }));
+    }
+
+    function renderExams(exams) {
+      const box = document.getElementById('exams');
+      if (!exams.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_exams'))); return; }
+      const head = el('tr', {}, [t('exam_title'), t('class_name'), t('col_status'), t('date'), t('submitted_works'), t('avg_result'), ''].map((h) => el('th', {}, h)));
+      const rows = exams.map((x) => el('tr', {},
+        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'))),
+        el('td', {}, x.className || '—'),
+        el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
+        el('td', {}, new Date(x.publishedAt || x.createdAt).toLocaleDateString('ru-RU')),
+        el('td', {}, `${x.submitted} / ${x.participants}`),
+        pctCell(x.avgPercent),
+        el('td', {}, x.status === 'draft' ? el('a', { href: 'edit.html?id=' + x.id }, t('open')) : el('a', { href: 'results.html?id=' + x.id }, t('results')))));
+      box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
+    }
+
+    requireLogin().then(async (user) => {
+      const name = (user.user_metadata && user.user_metadata.name) || user.email;
+      document.getElementById('name').textContent = name;
+      document.getElementById('who').textContent = `${user.email} · ${t('member_since')} ${new Date(user.created_at).toLocaleDateString('ru-RU')}`;
+      const st = await rpc('teacher_stats');
+      const ex = st.exams;
+      const withAvg = ex.filter((x) => x.avgPercent !== null && x.avgPercent !== undefined);
+      // Средний результат по всем экзаменам — с весом по числу оценённых работ.
+      const weight = withAvg.reduce((s, x) => s + x.graded, 0);
+      const avg = weight ? withAvg.reduce((s, x) => s + x.avgPercent * x.graded, 0) / weight : null;
+      document.getElementById('stats').replaceChildren(
+        stat(ex.length, t('exams_count')),
+        stat(ex.filter((x) => x.status === 'published').length, t('exams_running')),
+        stat(st.students, t('students_count')),
+        stat(ex.reduce((s, x) => s + x.submitted, 0), t('submitted_works')),
+        stat(fmtPct(avg), t('avg_result'), pctClass(avg)),
+        stat(st.materials, t('library_materials')));
+      renderClasses(st.classes);
+      renderExams(ex);
+    }).catch(showPageError);
+  </script>
+</body>
+</html>

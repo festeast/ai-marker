@@ -35,7 +35,8 @@
       list.replaceChildren();
       if (!exams.length) { list.append(el('p', { class: 'muted' }, t('no_exams'))); return; }
       const rows = exams.map((x) => el('tr', {},
-        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'))),
+        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'),
+          x.className ? ` · ${t('class_name')} ${x.className}` : '')),
         el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
         el('td', {}, x.code ? el('code', {}, x.code) : '—'),
         el('td', {}, `${t('participants')}: ${x.participantCount}`),

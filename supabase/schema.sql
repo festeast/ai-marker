@@ -15,6 +15,8 @@ create table if not exists public.exams (
   created_at timestamptz not null default now(),
   published_at timestamptz
 );
+-- Добавлено позже: класс или группа (для анализа по классам).
+alter table public.exams add column if not exists class_name text;
 
 create table if not exists public.questions (
   id bigint generated always as identity primary key,
@@ -68,11 +70,33 @@ create table if not exists public.events (
   created_at timestamptz not null default now()
 );
 
+-- Библиотека учителя: эталонные ответы, конспекты, документы по темам.
+-- Текст (content) ИИ использует при проверке экзаменов, к которым материал привязан;
+-- файл (если есть) лежит в Supabase Storage, корзина library, папка <id учителя>.
+create table if not exists public.materials (
+  id bigint generated always as identity primary key,
+  teacher_id uuid not null references auth.users(id) on delete cascade,
+  title text not null,
+  topic text,
+  content text,
+  file_path text,
+  file_name text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.exam_materials (
+  exam_id bigint not null references public.exams(id) on delete cascade,
+  material_id bigint not null references public.materials(id) on delete cascade,
+  primary key (exam_id, material_id)
+);
+
 create index if not exists exams_teacher on public.exams(teacher_id);
 create index if not exists questions_exam on public.questions(exam_id, position);
 create index if not exists participants_exam on public.participants(exam_id);
 create index if not exists events_exam on public.events(exam_id, id);
 create index if not exists events_participant on public.events(participant_id);
+create index if not exists materials_teacher on public.materials(teacher_id);
 
 alter table public.exams enable row level security;
 alter table public.questions enable row level security;
@@ -80,6 +104,8 @@ alter table public.participants enable row level security;
 alter table public.answers enable row level security;
 alter table public.events enable row level security;
 alter table public.grades enable row level security;
+alter table public.materials enable row level security;
+alter table public.exam_materials enable row level security;
 
 -- ---------- Настройки ----------
 
@@ -97,7 +123,7 @@ create or replace function public._exam_json(e public.exams) returns jsonb
 language sql stable as $$
   select jsonb_build_object(
     'id', e.id, 'title', e.title, 'type', e.type, 'status', e.status, 'code', e.code,
-    'createdAt', e.created_at, 'publishedAt', e.published_at)
+    'createdAt', e.created_at, 'publishedAt', e.published_at, 'className', e.class_name)
 $$;
 
 create or replace function public._questions_json(p_exam_id bigint, p_with_answers boolean) returns jsonb
@@ -189,7 +215,9 @@ create or replace function public.get_exam(p_exam_id bigint) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 declare e exams := _own_exam(p_exam_id);
 begin
-  return _exam_json(e) || jsonb_build_object('questions', _questions_json(e.id, true));
+  return _exam_json(e) || jsonb_build_object(
+    'questions', _questions_json(e.id, true),
+    'materialIds', coalesce((select jsonb_agg(material_id order by material_id) from exam_materials where exam_id = e.id), '[]'::jsonb));
 end $$;
 
 -- Сохраняет название и весь список вопросов черновика целиком.
@@ -334,6 +362,9 @@ begin
   return jsonb_build_object(
     'exam', _exam_json(e),
     'questions', _questions_json(e.id, true),
+    'materials', coalesce((
+      select jsonb_agg(jsonb_build_object('id', m.id, 'title', m.title, 'topic', m.topic, 'content', m.content) order by m.title)
+      from exam_materials em join materials m on m.id = em.material_id where em.exam_id = e.id), '[]'::jsonb),
     'maxScore', (select coalesce(sum(points), 0) from questions where exam_id = e.id),
     'participants', coalesce((
       select jsonb_agg(r.row order by r.name) from (
@@ -518,3 +549,185 @@ begin
   update participants set submitted_at = now() where id = p.id;
   perform _add_event(p, 'submit', null);
 end $$;
+
+-- ---------- Профиль, анализ по классам, библиотека ----------
+
+-- Баллы каждого участника экзамена. graded — сколько вопросов уже оценено
+-- (тест — все сразу, текстовые — по таблице grades).
+create or replace function public._participant_scores(p_exam_id bigint)
+returns table (participant_id bigint, name text, submitted boolean, total numeric, graded bigint)
+language sql stable security definer set search_path = public as $$
+  select p.id, p.name, p.submitted_at is not null,
+    coalesce(sum(case when e.type = 'quiz' then
+                   case when a.value = q.correct_index::text then q.points else 0 end
+                 else g.score end), 0),
+    count(q.id) filter (where e.type = 'quiz' or g.score is not null)
+  from participants p
+  join exams e on e.id = p.exam_id
+  left join questions q on q.exam_id = p.exam_id
+  left join answers a on a.question_id = q.id and a.participant_id = p.id
+  left join grades g on g.question_id = q.id and g.participant_id = p.id
+  where p.exam_id = p_exam_id
+  group by p.id, p.name, p.submitted_at
+$$;
+
+-- Сводка экзамена: сколько сдали и средний процент по полностью оценённым работам.
+create or replace function public._exam_summary(e public.exams) returns jsonb
+language sql stable security definer set search_path = public as $$
+  with m as (select coalesce(sum(points), 0) as max, count(*) as qn from questions where exam_id = e.id),
+       s as (select * from _participant_scores(e.id))
+  select _exam_json(e) || jsonb_build_object(
+    'maxScore', m.max,
+    'participants', (select count(*) from s),
+    'submitted', (select count(*) from s where s.submitted),
+    'graded', (select count(*) from s where s.submitted and s.graded = m.qn and m.qn > 0),
+    'avgPercent', (select round(avg(s.total * 100.0 / nullif(m.max, 0)), 1) from s
+                   where s.submitted and s.graded = m.qn and m.qn > 0))
+  from m
+$$;
+
+-- Результаты всех учеников учителя: одна строка на участника
+-- (экзамен без участников — одна строка с пустым именем).
+-- pct — процент от максимума, только если работа сдана и полностью оценена.
+create or replace function public._teacher_results(p_teacher uuid)
+returns table (cls text, exam_id bigint, created_at timestamptz, name text, pct numeric)
+language sql stable security definer set search_path = public as $$
+  select coalesce(e.class_name, ''), e.id, e.created_at, s.name,
+    case when s.submitted and s.graded = m.qn and m.qn > 0 and m.max > 0 then s.total * 100.0 / m.max end
+  from exams e
+  cross join lateral (select coalesce(sum(points), 0) as max, count(*) as qn from questions where exam_id = e.id) m
+  left join lateral _participant_scores(e.id) s on true
+  where e.teacher_id = p_teacher
+$$;
+
+-- Профиль учителя: все экзамены со сводкой, классы и ученики по классам.
+create or replace function public.teacher_stats() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return jsonb_build_object(
+    'exams', coalesce((select jsonb_agg(_exam_summary(e) order by e.created_at desc)
+                       from exams e where e.teacher_id = auth.uid()), '[]'::jsonb),
+    'materials', (select count(*) from materials where teacher_id = auth.uid()),
+    'students', (select count(distinct lower(r.name)) from _teacher_results(auth.uid()) r),
+    'classes', coalesce((
+      with r as (select * from _teacher_results(auth.uid())),
+      st as (
+        select r.cls, min(r.name) as name, count(distinct r.exam_id) as exams,
+               round(avg(r.pct), 1) as avg_pct,
+               round((array_agg(r.pct order by r.created_at desc) filter (where r.pct is not null))[1], 1) as last_pct
+        from r where r.name is not null group by r.cls, lower(r.name)),
+      c as (
+        select r.cls, count(distinct r.exam_id) as exams, count(distinct lower(r.name)) as students,
+               round(avg(r.pct), 1) as avg_pct
+        from r group by r.cls)
+      select jsonb_agg(jsonb_build_object(
+        'className', c.cls, 'exams', c.exams, 'students', c.students, 'avgPercent', c.avg_pct,
+        'studentList', (select jsonb_agg(jsonb_build_object(
+                          'name', st.name, 'exams', st.exams, 'avgPercent', st.avg_pct, 'lastPercent', st.last_pct)
+                          order by st.avg_pct desc nulls last, st.name)
+                        from st where st.cls = c.cls))
+        order by c.cls = '', c.cls)
+      from c), '[]'::jsonb));
+end $$;
+
+-- Класс экзамена и материалы библиотеки, которые ИИ учитывает при проверке.
+-- Можно менять в любой момент, в том числе после публикации.
+create or replace function public.update_exam_meta(p_exam_id bigint, p_class_name text, p_material_ids bigint[])
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  update exams set class_name = nullif(left(trim(coalesce(p_class_name, '')), 50), '') where id = e.id;
+  delete from exam_materials where exam_id = e.id;
+  insert into exam_materials (exam_id, material_id)
+  select e.id, m.id from materials m
+  where m.teacher_id = auth.uid() and m.id = any(coalesce(p_material_ids, '{}'));
+  return get_exam(e.id);
+end $$;
+
+-- Классы, которые учитель уже указывал (для подсказки при вводе).
+create or replace function public.list_classes() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return coalesce((select jsonb_agg(distinct class_name) from exams
+                   where teacher_id = auth.uid() and class_name is not null), '[]'::jsonb);
+end $$;
+
+create or replace function public._material_json(m public.materials) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'id', m.id, 'title', m.title, 'topic', m.topic, 'content', m.content,
+    'filePath', m.file_path, 'fileName', m.file_name, 'createdAt', m.created_at, 'updatedAt', m.updated_at,
+    'examCount', (select count(*) from exam_materials where material_id = m.id))
+$$;
+
+create or replace function public.list_materials() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return coalesce((select jsonb_agg(_material_json(m) order by lower(coalesce(m.topic, '')), lower(m.title))
+                   from materials m where m.teacher_id = auth.uid()), '[]'::jsonb);
+end $$;
+
+-- Создаёт (p_id = null) или изменяет материал. Файл загружает браузер в Storage,
+-- сюда передаётся только путь: он должен лежать в папке этого учителя.
+create or replace function public.save_material(p_id bigint, p_title text, p_topic text, p_content text,
+  p_file_path text default null, p_file_name text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare m materials;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
+  if length(coalesce(p_content, '')) > 100000 then raise exception 'material_too_long'; end if;
+  if p_file_path is not null and p_file_path not like auth.uid()::text || '/%' then raise exception 'invalid_file'; end if;
+  if coalesce(trim(p_content), '') = '' and p_file_path is null then raise exception 'material_empty'; end if;
+  if p_id is null then
+    insert into materials (teacher_id, title, topic, content, file_path, file_name)
+    values (auth.uid(), left(trim(p_title), 200), nullif(left(trim(coalesce(p_topic, '')), 100), ''),
+            nullif(trim(coalesce(p_content, '')), ''), p_file_path, left(p_file_name, 200))
+    returning * into m;
+  else
+    update materials set title = left(trim(p_title), 200), topic = nullif(left(trim(coalesce(p_topic, '')), 100), ''),
+      content = nullif(trim(coalesce(p_content, '')), ''), file_path = p_file_path,
+      file_name = left(p_file_name, 200), updated_at = now()
+    where id = p_id and teacher_id = auth.uid() returning * into m;
+    if not found then raise exception 'not_found'; end if;
+  end if;
+  return _material_json(m);
+end $$;
+
+-- Удаляет материал; возвращает путь файла, чтобы браузер удалил его из Storage.
+create or replace function public.delete_material(p_id bigint) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare m materials;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  delete from materials where id = p_id and teacher_id = auth.uid() returning * into m;
+  if not found then raise exception 'not_found'; end if;
+  return jsonb_build_object('filePath', m.file_path);
+end $$;
+
+revoke execute on function public._participant_scores(bigint), public._exam_summary(public.exams),
+  public._teacher_results(uuid), public._material_json(public.materials)
+  from public, anon, authenticated;
+
+-- Файлы библиотеки: закрытая корзина library, каждый учитель видит только свою папку.
+-- (Блок пропускается там, где нет Supabase Storage, например в тестах.)
+do $do$
+begin
+  if exists (select from information_schema.tables where table_schema = 'storage' and table_name = 'buckets') then
+    insert into storage.buckets (id, name, public, file_size_limit)
+    values ('library', 'library', false, 10485760) on conflict (id) do nothing;
+    drop policy if exists "library: own files read" on storage.objects;
+    drop policy if exists "library: own files upload" on storage.objects;
+    drop policy if exists "library: own files delete" on storage.objects;
+    create policy "library: own files read" on storage.objects for select to authenticated
+      using (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text);
+    create policy "library: own files upload" on storage.objects for insert to authenticated
+      with check (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text);
+    create policy "library: own files delete" on storage.objects for delete to authenticated
+      using (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text);
+  end if;
+end $do$;

@@ -27,6 +27,14 @@
         <p class="muted" data-i18n="ai_hint"></p>
       </div>
     </div>
+    <div class="card" id="analysis-card" hidden>
+      <h2 data-i18n="class_analysis"></h2>
+      <div id="analysis"></div>
+    </div>
+    <details class="card" id="meta-card">
+      <summary><b data-i18n="class_and_materials"></b> <span class="muted" id="meta-summary"></span></summary>
+      <div id="meta"></div>
+    </details>
     <div id="students"></div>
     <div class="error" id="err"></div>
   </main>
@@ -55,6 +63,57 @@
         el('td', {}, `${p.gradedCount} / ${qn}`),
       ));
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
+    }
+
+    // Анализ класса по сданным и полностью оценённым работам.
+    function renderAnalysis() {
+      const card = document.getElementById('analysis-card');
+      const qn = data.questions.length;
+      const submitted = data.participants.filter((p) => p.submittedAt);
+      const graded = submitted.filter((p) => p.gradedCount >= qn && data.maxScore > 0);
+      card.hidden = !submitted.length;
+      if (!submitted.length) return;
+      const box = document.getElementById('analysis');
+      if (!graded.length) { box.replaceChildren(el('p', { class: 'muted' }, t('analysis_wait'))); return; }
+
+      const pcts = graded.map((p) => ({ name: p.name, id: p.id, pct: Number(p.total) * 100 / data.maxScore })).sort((a, b) => b.pct - a.pct);
+      const avg = pcts.reduce((s, x) => s + x.pct, 0) / pcts.length;
+      const mid = pcts.length % 2 ? pcts[(pcts.length - 1) / 2].pct : (pcts[pcts.length / 2 - 1].pct + pcts[pcts.length / 2].pct) / 2;
+      const stat = (num, label, cls) => el('div', { class: 'stat' }, el('div', { class: 'num ' + (cls || '') }, num), el('div', { class: 'muted' }, label));
+
+      const dist = [5, 4, 3, 2].map((g) => ({ g, n: pcts.filter((x) => gradeFor(x.pct) === g).length }));
+      const bars = el('div', { class: 'bars' }, dist.map((d) => el('div', { class: 'bar-row' },
+        el('span', {}, `«${d.g}» `, el('span', { class: 'muted' }, t('grade_range_' + d.g))),
+        el('div', { class: 'bar g' + d.g }, el('span', { style: `width:${d.n * 100 / pcts.length}%` })),
+        el('span', {}, String(d.n)))));
+
+      // Средний процент по каждому вопросу: сначала самые трудные.
+      const perQ = data.questions.map((q, i) => {
+        const scores = graded.map((p) => p.answers[q.id] && p.answers[q.id].score).filter((v) => v !== undefined && v !== null);
+        const pct = scores.length ? scores.reduce((s, v) => s + Number(v), 0) * 100 / (scores.length * q.points) : null;
+        return { i, q, pct };
+      }).sort((a, b) => (a.pct ?? 101) - (b.pct ?? 101));
+      const qRows = perQ.map((x) => el('div', { class: 'bar-row' },
+        el('span', { title: x.q.text }, `${t('question')} ${x.i + 1}`),
+        el('div', { class: 'bar' }, el('span', { style: `width:${x.pct ?? 0}%` })),
+        el('span', { class: pctClass(x.pct) }, fmtPct(x.pct))));
+      const hardest = perQ.filter((x) => x.pct !== null && x.pct < 50);
+      const weak = pcts.filter((x) => x.pct < 40);
+
+      box.replaceChildren(...[
+        el('div', { class: 'stats' },
+          stat(fmtPct(avg), t('avg_result'), pctClass(avg)),
+          stat(fmtPct(mid), t('median_result')),
+          stat(`${fmtPct(pcts[0].pct)} / ${fmtPct(pcts[pcts.length - 1].pct)}`, t('best_worst')),
+          stat(`${graded.length} / ${submitted.length}`, t('graded_works'))),
+        graded.length < submitted.length ? el('p', { class: 'muted' }, t('analysis_partial')) : null,
+        el('h3', {}, t('grade_distribution')), bars,
+        el('h3', { style: 'margin-top:16px' }, t('per_question')), el('div', { class: 'bars' }, qRows),
+        hardest.length ? el('p', {}, el('b', {}, t('hard_questions') + ': '),
+          hardest.map((x) => `${x.i + 1}. ${x.q.text.length > 60 ? x.q.text.slice(0, 60) + '…' : x.q.text}`).join('; ')) : null,
+        weak.length ? el('p', {}, el('b', {}, t('need_help') + ': '),
+          ...weak.flatMap((x, k) => [k ? ', ' : '', el('a', { href: '#p' + x.id }, x.name), ` (${fmtPct(x.pct)})`])) : null,
+      ].filter(Boolean));
     }
 
     function gradeForm(p, q, a) {
@@ -162,11 +221,17 @@
       document.getElementById('title').textContent = data.exam.title;
       document.title = data.exam.title + ' — ' + t('results');
       renderSummary();
+      renderAnalysis();
       renderStudents();
+      const meta = data.exam.className ? `${t('class_name')}: ${data.exam.className}` : '';
+      document.getElementById('meta-summary').textContent = [meta, data.materials.length ? `${t('exam_materials')}: ${data.materials.length}` : ''].filter(Boolean).join(' · ');
       document.getElementById('ai-box').hidden = data.exam.type !== 'text' || !data.participants.some((p) => p.submittedAt);
     }
 
-    requireLogin().then(load).catch(showPageError);
+    requireLogin().then(load).then(async () => {
+      const exam = await rpc('get_exam', { p_exam_id: id });
+      await renderExamMeta(document.getElementById('meta'), exam);
+    }).catch(showPageError);
   </script>
 </body>
 </html>

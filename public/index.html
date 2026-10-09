@@ -2,23 +2,62 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Marker</title>
+  <title>AI Marker — экзамены с проверкой ИИ</title>
+  <meta name="description" content="Создайте тест или письменный экзамен, раздайте код ученикам, следите за честностью и проверяйте ответы с помощью ИИ.">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
 </head>
 <body>
-  <header><div class="wrap"><a class="brand" href="index.html" data-i18n="app_name"></a><a href="teacher.html" data-i18n="teacher_login"></a></div></header>
-  <main class="wrap narrow">
-    <div class="card">
+  <header><div class="wrap">
+    <a class="brand" href="index.html" data-i18n="app_name"></a>
+    <span class="row">
+      <a href="login.html" id="nav-login" data-i18n="login"></a>
+      <a class="btn small" href="teacher.html" id="nav-cabinet" data-i18n="my_cabinet" hidden></a>
+    </span>
+  </div></header>
+
+  <section class="hero"><div class="wrap hero-grid">
+    <div>
+      <h1 data-i18n="landing_title"></h1>
+      <p class="lead" data-i18n="landing_lead"></p>
+      <div class="row" id="teacher-cta">
+        <a class="btn" href="login.html#register" data-i18n="landing_start"></a>
+        <a class="btn secondary" href="login.html" data-i18n="login"></a>
+      </div>
+      <div class="row" id="teacher-cta-in" hidden>
+        <a class="btn" href="teacher.html" data-i18n="my_cabinet"></a>
+      </div>
+    </div>
+    <div class="card code-card">
+      <h2 data-i18n="landing_student"></h2>
       <p class="muted" data-i18n="student_intro"></p>
       <form id="code-form">
         <label for="code" data-i18n="enter_code"></label>
-        <input type="text" id="code" autocomplete="off" style="text-transform:uppercase" required>
+        <input type="text" id="code" autocomplete="off" style="text-transform:uppercase" placeholder="ABC123" required>
         <div class="error" id="err"></div>
         <button type="submit" data-i18n="go"></button>
       </form>
     </div>
+  </div></section>
+
+  <main class="wrap">
+    <div class="features">
+      <div class="card feature"><div class="feature-icon">📝</div><h3 data-i18n="f1_title"></h3><p class="muted" data-i18n="f1_text"></p></div>
+      <div class="card feature"><div class="feature-icon">👀</div><h3 data-i18n="f2_title"></h3><p class="muted" data-i18n="f2_text"></p></div>
+      <div class="card feature"><div class="feature-icon">🤖</div><h3 data-i18n="f3_title"></h3><p class="muted" data-i18n="f3_text"></p></div>
+      <div class="card feature"><div class="feature-icon">📊</div><h3 data-i18n="f4_title"></h3><p class="muted" data-i18n="f4_text"></p></div>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="how_title"></h2>
+      <ol class="steps">
+        <li><b data-i18n="how1_title"></b><span class="muted" data-i18n="how1_text"></span></li>
+        <li><b data-i18n="how2_title"></b><span class="muted" data-i18n="how2_text"></span></li>
+        <li><b data-i18n="how3_title"></b><span class="muted" data-i18n="how3_text"></span></li>
+      </ol>
+    </div>
+    <p class="muted center" data-i18n="landing_footer"></p>
   </main>
   <script>
     document.getElementById('code-form').addEventListener('submit', async (e) => {
@@ -29,6 +68,14 @@
         location.href = examLink(code);
       } catch (err) { document.getElementById('err').textContent = err.message; }
     });
+    // Учитель уже вошёл — ведём сразу в кабинет.
+    if (db) db.auth.getSession().then(({ data }) => {
+      const inside = !!data.session;
+      document.getElementById('nav-login').hidden = inside;
+      document.getElementById('nav-cabinet').hidden = !inside;
+      document.getElementById('teacher-cta').hidden = inside;
+      document.getElementById('teacher-cta-in').hidden = !inside;
+    }).catch(() => {});
   </script>
 </body>
 </html>

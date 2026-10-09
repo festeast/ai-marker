@@ -165,3 +165,44 @@ select delete_exam(:essay_id);
 select pg_temp.check(jsonb_array_length(list_exams()) = 2, 'экзамен удалён');
 
 
+
+-- ---------- класс, библиотека, профиль ----------
+select pg_temp.check(update_exam_meta(:exam_id, ' 7А ', null)->>'className' = '7А', 'класс сохранён без пробелов');
+select pg_temp.expect_error($$ select save_material(null, ' ', 'Химия', 'текст') $$, 'title_required');
+select pg_temp.expect_error($$ select save_material(null, 'Моль', 'Химия', ' ') $$, 'material_empty');
+select pg_temp.expect_error($$ select save_material(null, 'Моль', 'Химия', null, '22222222-2222-2222-2222-222222222222/a.pdf', 'a.pdf') $$, 'invalid_file');
+select (save_material(null, 'Моль', 'Химия', 'Моль — 6,02·10^23 частиц.')->>'id')::bigint as mid \gset
+select pg_temp.check(save_material(:mid, 'Моль (конспект)', 'Химия', 'Моль — 6,02·10^23 частиц.',
+  '11111111-1111-1111-1111-111111111111/1-mol.pdf', 'моль.pdf')->>'fileName' = 'моль.pdf', 'файл привязан');
+select pg_temp.check(update_exam_meta(:chem_id, '7А', array[:mid]::bigint[])->'materialIds' = jsonb_build_array(:mid), 'материал привязан к экзамену');
+select pg_temp.check(exam_results(:chem_id)->'materials'->0->>'content' like 'Моль%', 'материал попадает в проверку ИИ');
+select pg_temp.check(list_materials()->0->>'examCount' = '1', 'материал используется в одном экзамене');
+
+select teacher_stats() as st \gset
+select pg_temp.check(jsonb_array_length((:'st'::jsonb)->'exams') = 2, 'в профиле 2 экзамена');
+select pg_temp.check((:'st'::jsonb)->>'students' = '2', 'двое учеников');
+select pg_temp.check((:'st'::jsonb)->>'materials' = '1', 'один материал');
+select pg_temp.check((:'st'::jsonb)->'classes'->0->>'className' = '7А', 'класс 7А');
+select pg_temp.check((:'st'::jsonb)->'classes'->0->>'avgPercent' = '54.2', 'средний процент класса (50 и 58,3)');
+select pg_temp.check(jsonb_array_length((:'st'::jsonb)->'classes'->0->'studentList') = 2, 'ученики класса');
+select pg_temp.check((select e->>'avgPercent' from jsonb_array_elements((:'st'::jsonb)->'exams') e where (e->>'id')::bigint = :chem_id) = '58.3',
+  'средний процент экзамена');
+select pg_temp.check(list_classes() = '["7А"]'::jsonb, 'список классов');
+
+-- чужой учитель не видит и не привязывает материалы A
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.check(list_materials() = '[]'::jsonb, 'у B нет материалов');
+select (create_exam('Физика', 'text')->>'id')::bigint as phys_id \gset
+select pg_temp.check(update_exam_meta(:phys_id, null, array[:mid]::bigint[])->'materialIds' = '[]'::jsonb, 'чужой материал не привязывается');
+select pg_temp.expect_error(format('select delete_material(%s)', :mid), 'not_found');
+select pg_temp.expect_error(format($$ select update_exam_meta(%s, '7А', null) $$, :chem_id), 'not_found');
+select pg_temp.check(teacher_stats()->'classes'->0->>'className' = '', 'экзамен без класса');
+
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check(delete_material(:mid)->>'filePath' like '11111111-%', 'удаление возвращает путь файла');
+select pg_temp.check(get_exam(:chem_id)->'materialIds' = '[]'::jsonb, 'связь удалена вместе с материалом');
+
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error($$ select teacher_stats() $$, 'unauthorized');
+select pg_temp.expect_error($$ select list_materials() $$, 'unauthorized');

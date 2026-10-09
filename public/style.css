@@ -117,9 +117,7 @@ select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; f
 }
 
 /* переключатель языка */
-.lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.lang-switch button { background: transparent; color: var(--muted); border: 0; border-radius: 0; padding: 4px 10px; font-size: 14px; }
-.lang-switch button.active { background: var(--accent); color: var(--accent-ink); }
+.lang-switch { width: auto; margin: 0; padding: 4px 8px; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
 label.check { display: flex; gap: 8px; align-items: center; margin: 14px 0 2px; color: var(--text); cursor: pointer; }
 label.check input { width: auto; margin: 0; }
 p.small { font-size: 14px; margin: 0 0 8px; }

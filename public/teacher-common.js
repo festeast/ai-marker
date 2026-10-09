@@ -10,6 +10,7 @@ async function requireLogin() {
   const user = data.session.user;
   document.getElementById('me').textContent = (user.user_metadata && user.user_metadata.name) || user.email;
   refreshAiUsage();
+  showAdminLink();
   return user;
 }
 
@@ -19,6 +20,18 @@ function teacherHeader() {
   return `<header><div class="wrap"><a class="brand" href="index.html">${t('app_name')}</a>
     <nav class="nav">${link('teacher.html', 'my_exams')}${link('library.html', 'library')}${link('profile.html', 'profile')}</nav>
     <span class="row"><span class="badge" id="ai-usage" hidden></span><span class="muted" id="me"></span><button class="secondary small" id="logout">${t('logout')}</button></span></div></header>`;
+}
+
+// Ссылка «Админ» в шапке — только администраторам (таблица admins в базе).
+async function showAdminLink() {
+  try {
+    if (!(await rpc('is_admin'))) return;
+  } catch { return; }
+  const nav = document.querySelector('header .nav');
+  if (!nav || nav.querySelector('[href="admin.html"]')) return;
+  const a = el('a', { href: 'admin.html' }, t('admin'));
+  if (location.pathname.endsWith('/admin.html')) a.className = 'active';
+  nav.appendChild(a);
 }
 
 function ensureHeader() {

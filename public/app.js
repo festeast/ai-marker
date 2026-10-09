@@ -10,13 +10,16 @@ function appError(code) {
 
 // Вызов функции из supabase/schema.sql. Ошибки функции приходят кодом
 // (например, 'no_questions') и переводятся через i18n.
-async function rpc(fn, args = {}) {
+// timeoutMs — сколько ждать ответа; если связь зависла, запрос обрывается с ошибкой network.
+async function rpc(fn, args = {}, timeoutMs) {
   if (!db) throw appError('not_configured');
-  const { data, error } = await db.rpc(fn, args);
+  let query = db.rpc(fn, args);
+  if (timeoutMs) query = query.abortSignal(AbortSignal.timeout(timeoutMs));
+  const { data, error } = await query;
   if (error) {
     const msg = error.message || '';
     if (I18N.ru['err_' + msg]) throw appError(msg);
-    if (msg.includes('fetch')) throw appError('network');
+    if (/fetch|abort|timeout|network|load failed/i.test(msg)) throw appError('network');
     // Функции нет в базе: schema.sql не выполнен заново после обновления сайта.
     if (error.code === 'PGRST202' || msg.includes('Could not find the function')) throw appError('schema_outdated');
     // Неизвестная ошибка: показываем и текст от сервера, чтобы было понятно, что случилось.

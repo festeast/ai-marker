@@ -21,6 +21,7 @@
       </form>
     </div>
     <div id="attempt" hidden>
+      <div class="conn-bar" id="offline" role="status" hidden></div>
       <div class="notice" data-i18n="monitor_notice"></div>
       <div id="questions"></div>
       <div class="row spread">
@@ -46,7 +47,8 @@
 
     function sendEvent(type, detail) {
       if (finished) return;
-      rpc('log_event', { p_token: token, p_type: type, p_detail: detail }).catch(() => {});
+      if (eventQueue.length < 200) eventQueue.push({ type, detail });
+      flushEvents();
     }
     function markAway(reason) {
       if (away || suppress || finished) return;
@@ -88,15 +90,122 @@
         const q = e.target.closest && e.target.closest('[data-qid]');
         sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null });
       });
-      setInterval(() => { if (!finished) rpc('heartbeat', { p_token: token }).catch(() => {}); }, 10000);
+      setInterval(() => {
+        if (finished || !online) return;
+        rpc('heartbeat', { p_token: token }, 10000).catch((err) => { if (retryable(err)) goOffline(); });
+      }, 10000);
     }
 
-    // ---------- ответы ----------
-    let saveTimer = null;
-    function scheduleSave() {
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => rpc('save_answers', { p_token: token, p_answers: answers }).catch(showError), 800);
+    // ---------- связь ----------
+    // Ответы сначала сохраняются на этом устройстве, а на сервер уходят, когда есть интернет.
+    // Если связь пропала, страница сама повторяет отправку; сдача работы тоже ждёт связи.
+    const localKey = storeKey + ':answers', submitKey = storeKey + ':submit';
+    const eventQueue = [];
+    let saveTimer = null, retryTimer = null, retryDelay = 2000;
+    let dirty = false, busy = false, submitting = false, sendingEvents = false, online = true, submitPending = false;
+    try { submitPending = localStorage.getItem(submitKey) === '1'; } catch {}
+    const retryable = (err) => err.code === 'network' || err.code === 'server_error';
+
+    function setConn(state) {
+      const line = document.getElementById('save-state');
+      line.textContent = t('conn_' + state);
+      line.className = state === 'offline' || state === 'submit_waiting' ? 'warn' : 'muted';
+      const bar = document.getElementById('offline');
+      bar.hidden = !(state === 'offline' || state === 'submit_waiting');
+      bar.textContent = t('conn_' + state);
+      document.getElementById('submit').disabled = submitPending;
     }
+
+    function storeLocal() {
+      try { localStorage.setItem(localKey, JSON.stringify(answers)); } catch {}
+    }
+
+    function goOffline() {
+      online = false;
+      setConn(submitPending ? 'submit_waiting' : 'offline');
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(flush, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 30000);
+    }
+    function backOnline() {
+      online = true; retryDelay = 2000;
+    }
+
+    function scheduleSave() {
+      storeLocal();
+      dirty = true;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(flush, 800);
+    }
+
+    // Отправляет то, что ещё не дошло: сдачу работы, ответы, события.
+    async function flush() {
+      clearTimeout(retryTimer);
+      if (finished) return;
+      if (submitPending) return trySubmit();
+      if (busy) return;
+      if (!dirty) { if (!online) await pingServer(); return flushEvents(); }
+      busy = true; dirty = false;
+      if (online) setConn('saving');
+      try {
+        await rpc('save_answers', { p_token: token, p_answers: answers }, 15000);
+        backOnline();
+        setConn(dirty ? 'saving' : 'saved');
+      } catch (err) {
+        dirty = true;
+        if (retryable(err)) goOffline(); else showError(err);
+      } finally { busy = false; }
+      if (online) { if (dirty) saveTimer = setTimeout(flush, 800); flushEvents(); }
+    }
+
+    async function pingServer() {
+      try { await rpc('heartbeat', { p_token: token }, 10000); backOnline(); setConn('saved'); } catch { goOffline(); }
+    }
+
+    async function flushEvents() {
+      if (sendingEvents || !online) return;
+      sendingEvents = true;
+      try {
+        while (eventQueue.length && !finished) {
+          const e = eventQueue[0];
+          try {
+            await rpc('log_event', { p_token: token, p_type: e.type, p_detail: e.detail }, 15000);
+          } catch (err) {
+            if (retryable(err)) { goOffline(); return; }
+          }
+          eventQueue.shift();
+        }
+      } finally { sendingEvents = false; }
+    }
+
+    async function trySubmit() {
+      if (submitting) return;
+      submitPending = true;
+      try { localStorage.setItem(submitKey, '1'); } catch {}
+      clearTimeout(saveTimer);
+      submitting = true;
+      setConn('submitting');
+      try {
+        await rpc('submit_attempt', { p_token: token, p_answers: answers }, 20000);
+        finishAttempt();
+      } catch (err) {
+        if (err.code === 'already_submitted') finishAttempt();
+        else if (retryable(err)) goOffline();
+        else {
+          submitPending = false;
+          try { localStorage.removeItem(submitKey); } catch {}
+          setConn('saved');
+          showError(err);
+        }
+      } finally { submitting = false; }
+    }
+
+    function finishAttempt() {
+      try { localStorage.removeItem(localKey); localStorage.removeItem(submitKey); } catch {}
+      showDone();
+    }
+
+    window.addEventListener('online', () => { if (!online) { retryDelay = 2000; flush(); } });
 
     // Вопрос «по порядку»: ответ — номера элементов (как у учителя) через запятую в порядке ученика.
     function renderOrder(q, parts) {
@@ -153,11 +262,21 @@
       const data = await rpc('get_attempt', { p_token: token });
       document.getElementById('who').textContent = data.name;
       Object.assign(answers, data.answers);
-      if (data.submitted) return showDone();
+      if (data.submitted) return finishAttempt();
       if (data.exam.status !== 'published') throw new Error(t('err_exam_not_open'));
+      // Ответы с этого устройства новее серверных: часть могла не успеть уйти.
+      let local = null;
+      try { local = JSON.parse(localStorage.getItem(localKey) || 'null'); } catch {}
+      if (local && typeof local === 'object') {
+        for (const [k, v] of Object.entries(local)) {
+          if (answers[k] !== v) { answers[k] = v; dirty = true; }
+        }
+      }
       renderQuestions(data);
       document.getElementById('attempt').hidden = false;
+      setConn('saved');
       startTracking();
+      if (submitPending || dirty) flush();
     }
 
     document.getElementById('join-form').addEventListener('submit', async (e) => {
@@ -175,16 +294,14 @@
       const ok = confirm(t('submit_q'));
       suppress = false;
       if (!ok) return;
-      try {
-        clearTimeout(saveTimer);
-        await rpc('submit_attempt', { p_token: token, p_answers: answers });
-        showDone();
-      } catch (err) { showError(err); }
+      storeLocal();
+      trySubmit();
     });
 
-    (async () => {
+    (async function start() {
       try {
-        const exam = await rpc('exam_by_code', { p_code: code });
+        const exam = await rpc('exam_by_code', { p_code: code }, 20000);
+        document.getElementById('err').textContent = '';
         document.getElementById('title').textContent = exam.title;
         document.title = exam.title + ' — AI Marker';
         if (token) {
@@ -195,7 +312,11 @@
         }
         if (exam.status !== 'published') throw new Error(t('err_exam_not_open'));
         document.getElementById('join').hidden = false;
-      } catch (err) { showError(err); }
+      } catch (err) {
+        showError(err);
+        // Нет связи при открытии — пробуем ещё раз через несколько секунд.
+        if (retryable(err)) setTimeout(start, 5000);
+      }
     })();
   </script>
 </body>

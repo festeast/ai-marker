@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Профиль — AI Marker</title>
+  <title data-i18n="title_profile">Профиль — AI Marker</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
@@ -60,7 +60,7 @@
         el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'))),
         el('td', {}, x.className || '—'),
         el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
-        el('td', {}, new Date(x.publishedAt || x.createdAt).toLocaleDateString('ru-RU')),
+        el('td', {}, new Date(x.publishedAt || x.createdAt).toLocaleDateString(LOCALE)),
         el('td', {}, `${x.submitted} / ${x.participants}`),
         pctCell(x.avgPercent),
         el('td', {}, x.status === 'draft' ? el('a', { href: 'edit.html?id=' + x.id }, t('open')) : el('a', { href: 'results.html?id=' + x.id }, t('results')))));
@@ -70,7 +70,7 @@
     requireLogin().then(async (user) => {
       const name = (user.user_metadata && user.user_metadata.name) || user.email;
       document.getElementById('name').textContent = name;
-      document.getElementById('who').textContent = `${user.email} · ${t('member_since')} ${new Date(user.created_at).toLocaleDateString('ru-RU')}`;
+      document.getElementById('who').textContent = `${user.email} · ${t('member_since')} ${new Date(user.created_at).toLocaleDateString(LOCALE)}`;
       const st = await rpc('teacher_stats');
       const ex = st.exams;
       const withAvg = ex.filter((x) => x.avgPercent !== null && x.avgPercent !== undefined);

@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Редактор — AI Marker</title>
+  <title data-i18n="title_edit">Редактор — AI Marker</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
@@ -18,6 +18,11 @@
       <p class="muted" id="type"></p>
       <div id="meta"></div>
     </div>
+    <details class="card" id="gen-box">
+      <summary><b data-i18n="gen_title"></b></summary>
+      <p class="muted" data-i18n="gen_intro"></p>
+      <div id="gen"></div>
+    </details>
     <div class="card">
       <h2 data-i18n="questions"></h2>
       <div id="questions"></div>
@@ -115,6 +120,58 @@
       location.href = 'teacher.html';
     }));
 
+    // ИИ составляет вопросы по материалу из библиотеки; они добавляются в список, учитель их проверяет и сохраняет.
+    async function renderGenerator() {
+      const box = document.getElementById('gen');
+      const materials = (await rpc('list_materials')).filter((m) => m.content);
+      if (!materials.length) {
+        box.replaceChildren(el('p', {}, t('gen_no_materials'), ' ', el('a', { href: 'library.html' }, t('library'))));
+        return;
+      }
+      const material = el('select', {}, el('option', { value: '' }, t('gen_pick')),
+        materials.map((m) => el('option', { value: m.id }, m.title + (m.topic ? ' · ' + m.topic : ''))));
+      // Если к экзамену привязан один материал — сразу выбираем его.
+      const linked = materials.filter((m) => (exam.materialIds || []).includes(m.id));
+      if (linked.length === 1) material.value = linked[0].id;
+      const count = el('input', { type: 'number', min: 1, max: 20, value: 5, style: 'width:80px' });
+      const lang = el('select', {}, el('option', { value: 'ru' }, t('gen_lang_ru')), el('option', { value: 'kk' }, t('gen_lang_kk')));
+      lang.value = LANG;
+      const wishes = el('input', { type: 'text', maxlength: 500, placeholder: t('gen_wishes_placeholder') });
+      const model = el('select', {}, el('option', { value: 'free' }, t('ai_model_free')), el('option', { value: 'paid' }, t('ai_model_paid')));
+      let saved = 'free';
+      try { saved = localStorage.getItem('aiQuality') || 'free'; } catch {}
+      if (saved === 'paid') model.value = 'paid';
+      const msg = el('span', { class: 'muted' });
+      const btn = el('button', { type: 'button' }, t('gen_btn'));
+      btn.addEventListener('click', async () => {
+        msg.className = 'muted'; msg.textContent = '';
+        if (!material.value) { msg.className = 'error'; msg.textContent = t('err_gen_no_material'); return; }
+        btn.disabled = true; msg.textContent = t('gen_running');
+        try {
+          const res = await callFunction('grade', {
+            action: 'generate', materialId: Number(material.value), count: Number(count.value) || 5,
+            examType: exam.type, lang: lang.value, wishes: wishes.value,
+            quality: model.value === 'paid' ? 'paid' : (saved.startsWith('free:') ? saved : 'free'),
+          });
+          // Пустые вопросы-заготовки убираем, новые добавляем в конец.
+          exam.questions = exam.questions.filter((q) => q.text.trim());
+          exam.questions.push(...res.questions);
+          render();
+          msg.className = 'ok'; msg.textContent = t('gen_done').replace('{n}', res.questions.length);
+        } catch (err) {
+          msg.className = 'error'; msg.textContent = err.message;
+        } finally { btn.disabled = false; }
+      });
+      box.replaceChildren(
+        el('label', {}, t('gen_material')), material,
+        el('div', { class: 'row', style: 'margin-top:8px' },
+          el('label', { class: 'row', style: 'margin:0' }, t('gen_count'), count),
+          el('label', { class: 'row', style: 'margin:0' }, t('gen_lang'), lang),
+          el('label', { class: 'row', style: 'margin:0' }, t('ai_model'), model)),
+        el('label', {}, t('gen_wishes')), wishes,
+        el('div', { class: 'row', style: 'margin-top:12px' }, btn, msg));
+    }
+
     requireLogin().then(async () => {
       exam = await rpc('get_exam', { p_exam_id: id });
       if (exam.status !== 'draft') { location.href = 'monitor.html?id=' + id; return; }
@@ -123,6 +180,7 @@
       if (!exam.questions.length) exam.questions.push(blankQuestion());
       render();
       renderExamMeta(document.getElementById('meta'), exam).catch(showPageError);
+      renderGenerator().catch(showPageError);
     }).catch(showPageError);
   </script>
 </body>

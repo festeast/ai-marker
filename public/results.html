@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ответы и оценки — AI Marker</title>
+  <title data-i18n="title_results">Ответы и оценки — AI Marker</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
@@ -175,7 +175,7 @@
       try {
         for (let i = 0; i < students.length; i++) {
           msg.textContent = `${t('ai_grading')}: ${students[i].name} (${i + 1} / ${students.length})…`;
-          await callFunction('grade', { examId: id, participantId: students[i].id, quality: quality.value });
+          await callFunction('grade', { examId: id, participantId: students[i].id, quality: quality.value, lang: LANG });
         }
         msg.className = 'ok';
         msg.textContent = t('ai_done');

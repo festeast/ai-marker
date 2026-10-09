@@ -58,7 +58,13 @@ tr.flagged td { background: #fff7f7; }
 @media (max-width: 600px) { .type-choice { grid-template-columns: 1fr; } }
 
 /* Шапка кабинета */
-header .wrap { flex-wrap: wrap; }
+/* Шапка на всю ширину. На широком экране — одна строка: меню слева, остальное справа;
+   на узком меню переносится отдельной строкой под логотипом. */
+header .wrap { flex-wrap: wrap; max-width: none; padding-left: 24px; padding-right: 24px; }
+header a.brand, .nav a { white-space: nowrap; }
+@media (min-width: 1100px) { header .wrap { flex-wrap: nowrap; } header .wrap > .row { flex-wrap: nowrap; white-space: nowrap; } }
+@media (max-width: 1099px) { .nav { order: 3; width: 100%; margin-left: 0; } }
+@media (max-width: 1250px) { #me { display: none; } }
 header .wrap > .row { margin-left: auto; }
 .nav { display: flex; gap: 16px; flex-wrap: wrap; margin-right: auto; margin-left: 12px; }
 .nav a { color: var(--muted); text-decoration: none; }
@@ -108,7 +114,6 @@ select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; f
 }
 @media (max-width: 500px) {
   .features { grid-template-columns: 1fr; }
-  .nav { margin-left: 0; order: 3; width: 100%; }
 }
 
 /* переключатель языка */

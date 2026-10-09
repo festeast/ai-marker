@@ -6,7 +6,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
-  <script src="teacher-common.js"></script>
+  <script src="teacher-common.js"></script><script src="extract.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -24,6 +24,10 @@
         <label for="m-file" data-i18n="material_file"></label>
         <input type="file" id="m-file" accept=".pdf,.doc,.docx,.txt,.md,.ppt,.pptx,.xls,.xlsx,.jpg,.jpeg,.png">
         <p class="muted" id="current-file" hidden></p>
+        <div class="row">
+          <button type="button" class="secondary small" id="extract" data-i18n="extract_btn" hidden></button>
+          <span class="muted" id="extract-msg"></span>
+        </div>
         <p class="muted" data-i18n="material_file_hint"></p>
         <div class="row">
           <button type="submit" id="save" data-i18n="save"></button>
@@ -80,11 +84,54 @@
       if (win) win.location.href = data.signedUrl; else location.href = data.signedUrl;
     }
 
-    // Текст из .txt/.md подставляем в поле сразу — его прочитает ИИ.
+    // Файл, из которого можно достать текст: выбранный сейчас или уже сохранённый.
+    function extractSource() {
+      const f = form.file.files[0];
+      if (f) return canExtractText(f.name) || /\.(doc|ppt|xls)$/i.test(f.name) ? { name: f.name, file: f } : null;
+      if (editing && editing.filePath && canExtractText(editing.fileName)) return { name: editing.fileName, path: editing.filePath };
+      return null;
+    }
+
+    function updateExtractButton() {
+      document.getElementById('extract').hidden = !extractSource();
+    }
+
+    // Текст из PDF, Word, презентации или таблицы кладём в поле — его прочитает ИИ.
+    async function extractIntoForm(auto) {
+      const src = extractSource();
+      if (!src) return;
+      const msg = document.getElementById('extract-msg');
+      const btn = document.getElementById('extract');
+      if (form.content.value.trim()) {
+        if (auto) { msg.className = 'muted'; msg.textContent = t('extract_kept'); return; }
+        if (!confirm(t('extract_replace_q'))) return;
+      }
+      msg.className = 'muted'; msg.textContent = t('extract_running'); btn.disabled = true;
+      try {
+        let file = src.file;
+        if (!file) {
+          const { data, error } = await db.storage.from('library').download(src.path);
+          if (error) throw appError('file_open');
+          file = new File([data], src.name);
+        }
+        let text = await extractText(file);
+        const cut = text.length > 100000;
+        if (cut) text = text.slice(0, 100000);
+        form.content.value = text;
+        msg.className = 'ok';
+        msg.textContent = t('extract_done').replace('{n}', text.length.toLocaleString('ru-RU')) + (cut ? ' ' + t('extract_cut') : '');
+      } catch (err) {
+        msg.className = 'error'; msg.textContent = err.message;
+      } finally { btn.disabled = false; }
+    }
+
+    document.getElementById('extract').addEventListener('click', () => extractIntoForm(false));
     form.file.addEventListener('change', async () => {
       const f = form.file.files[0];
-      if (f && /\.(txt|md)$/i.test(f.name) && !form.content.value.trim() && f.size < 500000) form.content.value = await f.text();
+      document.getElementById('extract-msg').textContent = '';
+      updateExtractButton();
       if (f && !form.title.value.trim()) form.title.value = f.name.replace(/\.[^.]+$/, '');
+      if (f && extractSource()) await extractIntoForm(true);
     });
 
     function resetForm() {
@@ -94,6 +141,8 @@
       document.getElementById('cancel').hidden = true;
       document.getElementById('current-file').hidden = true;
       document.getElementById('form-err').textContent = '';
+      document.getElementById('extract-msg').textContent = '';
+      updateExtractButton();
     }
 
     function startEdit(m) {
@@ -104,6 +153,8 @@
       const cur = document.getElementById('current-file');
       cur.hidden = !m.fileName;
       cur.textContent = m.fileName ? `${t('material_current_file')}: ${m.fileName}` : '';
+      document.getElementById('extract-msg').textContent = '';
+      updateExtractButton();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 

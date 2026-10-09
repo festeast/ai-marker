@@ -206,3 +206,27 @@ reset request.jwt.claim.sub;
 set role anon;
 select pg_temp.expect_error($$ select teacher_stats() $$, 'unauthorized');
 select pg_temp.expect_error($$ select list_materials() $$, 'unauthorized');
+
+-- администратор
+reset role;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+set role authenticated;
+select pg_temp.check(not is_admin(), 'A пока не администратор');
+select pg_temp.expect_error($$ select admin_users() $$, 'forbidden');
+reset role;
+insert into public.admins (user_id) values ('11111111-1111-1111-1111-111111111111') on conflict do nothing;
+set role authenticated;
+select pg_temp.check(is_admin(), 'A стал администратором');
+select admin_users() as au \gset
+select pg_temp.check(((:'au'::jsonb)->'totals'->>'users')::int = 2, 'всего пользователей');
+select pg_temp.check(((:'au'::jsonb)->'totals'->>'exams')::int = 3, 'всего экзаменов');
+select pg_temp.check((select (u->>'isAdmin')::boolean from jsonb_array_elements((:'au'::jsonb)->'users') u
+  where u->>'id' = '11111111-1111-1111-1111-111111111111'), 'отмечен администратор');
+select pg_temp.check((select (u->>'exams')::int from jsonb_array_elements((:'au'::jsonb)->'users') u
+  where u->>'id' = '22222222-2222-2222-2222-222222222222') = 1, 'экзамены пользователя B');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error($$ select admin_users() $$, 'forbidden');
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error($$ select admin_users() $$, 'unauthorized');
+select pg_temp.check(not is_admin(), 'аноним не администратор');

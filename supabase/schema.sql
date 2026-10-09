@@ -731,3 +731,46 @@ begin
       using (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text);
   end if;
 end $do$;
+
+-- ---------- Администратор ----------
+
+-- Кто видит страницу admin.html. Добавить себя (подставьте свою почту, с которой входите на сайт):
+--   insert into public.admins (user_id) select id from auth.users where email = 'ваша@почта' on conflict do nothing;
+create table if not exists public.admins (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+alter table public.admins enable row level security;
+
+create or replace function public.is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select auth.uid() is not null and exists (select from admins where user_id = auth.uid())
+$$;
+
+-- Все зарегистрированные пользователи с их активностью и общие цифры сайта.
+create or replace function public.admin_users() returns jsonb
+language plpgsql stable security definer set search_path = public, auth as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if not is_admin() then raise exception 'forbidden'; end if;
+  return jsonb_build_object(
+    'totals', jsonb_build_object(
+      'users', (select count(*) from auth.users),
+      'newUsers7d', (select count(*) from auth.users where created_at > now() - interval '7 days'),
+      'activeUsers7d', (select count(*) from auth.users where last_sign_in_at > now() - interval '7 days'),
+      'exams', (select count(*) from exams),
+      'publishedExams', (select count(*) from exams where code is not null),
+      'participants', (select count(*) from participants),
+      'materials', (select count(*) from materials)),
+    'users', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', u.id, 'email', u.email, 'name', u.raw_user_meta_data->>'name',
+        'createdAt', u.created_at, 'lastSignInAt', u.last_sign_in_at,
+        'isAdmin', exists (select from admins a where a.user_id = u.id),
+        'exams', (select count(*) from exams e where e.teacher_id = u.id),
+        'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = u.id),
+        'materials', (select count(*) from materials m where m.teacher_id = u.id),
+        'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id))
+        order by u.created_at desc)
+      from auth.users u), '[]'::jsonb));
+end $$;

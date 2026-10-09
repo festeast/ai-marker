@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Админ — AI Marker</title>
+  <title data-i18n="title_admin">Админ — AI Marker</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
@@ -28,8 +28,8 @@
   <script>
     let users = [];
     const stat = (num, label) => el('div', { class: 'stat' }, el('div', { class: 'num' }, String(num)), el('div', { class: 'muted' }, label));
-    const day = (v) => v ? new Date(v).toLocaleDateString('ru-RU') : '—';
-    const dayTime = (v) => v ? new Date(v).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+    const day = (v) => v ? new Date(v).toLocaleDateString(LOCALE) : '—';
+    const dayTime = (v) => v ? new Date(v).toLocaleString(LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 
     function render() {
       const q = document.getElementById('search').value.trim().toLowerCase();

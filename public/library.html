@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Библиотека — AI Marker</title>
+  <title data-i18n="title_library">Библиотека — AI Marker</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
@@ -120,7 +120,7 @@
         if (cut) text = text.slice(0, 100000);
         form.content.value = text;
         msg.className = 'ok';
-        msg.textContent = t('extract_done').replace('{n}', text.length.toLocaleString('ru-RU')) + (cut ? ' ' + t('extract_cut') : '');
+        msg.textContent = t('extract_done').replace('{n}', text.length.toLocaleString(LOCALE)) + (cut ? ' ' + t('extract_cut') : '');
       } catch (err) {
         msg.className = 'error'; msg.textContent = err.message;
       } finally { btn.disabled = false; }

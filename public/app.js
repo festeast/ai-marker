@@ -85,6 +85,20 @@ function rpcKeepalive(fn, args) {
 function applyI18n(root = document) {
   root.querySelectorAll('[data-i18n]').forEach((node) => { node.textContent = t(node.dataset.i18n); });
   root.querySelectorAll('[data-i18n-placeholder]').forEach((node) => { node.placeholder = t(node.dataset.i18nPlaceholder); });
+  if (root === document) { document.documentElement.lang = LANG; addLangSwitch(); }
+}
+
+// Переключатель «Рус | Қаз» в шапке. Выбор запоминается в браузере.
+function addLangSwitch() {
+  const bar = document.querySelector('header .wrap');
+  if (!bar || bar.querySelector('.lang-switch')) return;
+  const box = el('span', { class: 'lang-switch', role: 'group', 'aria-label': t('lang_switch') },
+    ['ru', 'kk'].map((code) => el('button', {
+      type: 'button', class: code === LANG ? 'active' : '', 'aria-pressed': String(code === LANG),
+      onclick: () => { if (code !== LANG) setLang(code); },
+    }, t('lang_' + code))));
+  const right = bar.querySelector(':scope > .row');
+  if (right) right.prepend(box); else bar.append(box);
 }
 
 function el(tag, attrs = {}, ...children) {
@@ -99,13 +113,13 @@ function el(tag, attrs = {}, ...children) {
 }
 
 function fmtTime(value) {
-  return new Date(value).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return new Date(value).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function fmtDuration(ms) {
   const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} с`;
-  return `${Math.floor(s / 60)} мин ${s % 60} с`;
+  if (s < 60) return `${s} ${t('sec_short')}`;
+  return `${Math.floor(s / 60)} ${t('min_short')} ${s % 60} ${t('sec_short')}`;
 }
 
 // Ссылка на страницу внутри сайта; работает и в подпапке GitHub Pages.

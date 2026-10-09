@@ -110,3 +110,8 @@ select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; f
   .features { grid-template-columns: 1fr; }
   .nav { margin-left: 0; order: 3; width: 100%; }
 }
+
+/* переключатель языка */
+.lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.lang-switch button { background: transparent; color: var(--muted); border: 0; border-radius: 0; padding: 4px 10px; font-size: 14px; }
+.lang-switch button.active { background: var(--accent); color: var(--accent-ink); }

@@ -41,6 +41,7 @@ function ensureHeader() {
     if (db) await db.auth.signOut().catch(() => {});
     location.href = 'login.html';
   });
+  addLangSwitch();
 }
 
 document.addEventListener('DOMContentLoaded', ensureHeader);

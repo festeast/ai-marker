@@ -54,11 +54,11 @@ async function refreshAiUsage() {
     const u = await callFunction('grade', { action: 'usage' });
     if (u.provider !== 'openrouter' || u.error) { box.hidden = true; return; }
     const parts = [t('ai_spent') + ' ' + money(u.spent ?? 0)];
-    if (u.spentToday) parts.push(t('ai_today') + ' ' + money(u.spentToday));
     if (u.balance != null) parts.push(t('ai_balance') + ' ' + money(u.balance));
     else if (u.freeTier) parts.push(t('ai_free_tier'));
     box.textContent = t('ai_label') + ': ' + parts.join(' · ');
-    box.title = t('ai_usage_hint');
+    // Расход за сегодня — в подсказке, чтобы шапка помещалась в одну строку.
+    box.title = t('ai_usage_hint') + (u.spentToday ? ` (${t('ai_today')} ${money(u.spentToday)})` : '');
     box.hidden = false;
   } catch { box.hidden = true; }
 }

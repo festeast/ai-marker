@@ -37,7 +37,7 @@ button:disabled { opacity: .5; cursor: default; }
 .badge.away { background: #fdecc8; color: var(--warn); }
 .badge.offline { background: #eceef2; color: var(--muted); }
 .badge.flag { background: #fde2e2; color: var(--bad); }
-.type-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.type-choice { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
 .type-choice label { margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; cursor: pointer; color: var(--text); }
 .type-choice input { margin-right: 6px; }
 .question { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
@@ -120,3 +120,13 @@ select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; f
 .lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .lang-switch button { background: transparent; color: var(--muted); border: 0; border-radius: 0; padding: 4px 10px; font-size: 14px; }
 .lang-switch button.active { background: var(--accent); color: var(--accent-ink); }
+label.check { display: flex; gap: 8px; align-items: center; margin: 14px 0 2px; color: var(--text); cursor: pointer; }
+label.check input { width: auto; margin: 0; }
+p.small { font-size: 14px; margin: 0 0 8px; }
+.order-list { display: grid; gap: 6px; margin: 8px 0; }
+.order-item { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--card, #fff); }
+.order-item .num { min-width: 1.6em; font-weight: 600; color: var(--muted, #666); }
+.order-item .txt { flex: 1; }
+.order-item input { flex: 1; margin: 0; }
+.order-item button { padding: 4px 10px; font-size: 14px; }
+.kind-tag { font-size: 13px; color: var(--muted, #666); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px; font-weight: normal; }

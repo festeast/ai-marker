@@ -43,7 +43,7 @@ The exam may come with <materials>: the teacher's notes, textbook excerpts or mo
 
 Return one grade for every question you were given, using its questionId.`;
 
-type Question = { id: number; text: string; points: number; reference?: string };
+type Question = { id: number; kind?: string; text: string; points: number; reference?: string };
 type Material = { title: string; topic?: string | null; content?: string | null };
 // Сколько текста материалов отправляем ИИ (остальное обрезаем).
 const MATERIALS_LIMIT = 30000;
@@ -279,14 +279,16 @@ Teacher's wishes: ${escapeXml(String(wishes ?? "").slice(0, 500)) || "none"}
 
   const { data: results, error } = await db.rpc("exam_results", { p_exam_id: examId });
   if (error) return json({ error: error.message }, error.message === "unauthorized" ? 401 : 400);
-  if (results.exam.type !== "text") return json({ error: "not_gradable" }, 400);
+  // ИИ проверяет только открытые вопросы; тестовые база считает сама.
+  const isText = (q: Question) => (q.kind ?? (results.exam.type === "text" ? "text" : "choice")) === "text";
+  if (!results.questions.some(isText)) return json({ error: "not_gradable" }, 400);
 
   const student = results.participants.find((p: { id: number }) => p.id === participantId);
   if (!student) return json({ error: "not_found" }, 404);
 
   // Оценки, поставленные учителем вручную, ИИ не трогает.
   const questions: Question[] = results.questions.filter(
-    (q: Question) => (student.answers[q.id] as Answer | undefined)?.source !== "teacher",
+    (q: Question) => isText(q) && (student.answers[q.id] as Answer | undefined)?.source !== "teacher",
   );
   const grades: { participantId: number; questionId: number; score: number; comment: string }[] = [];
 

@@ -98,16 +98,39 @@
       saveTimer = setTimeout(() => rpc('save_answers', { p_token: token, p_answers: answers }).catch(showError), 800);
     }
 
+    // Вопрос «по порядку»: ответ — номера элементов (как у учителя) через запятую в порядке ученика.
+    function renderOrder(q, parts) {
+      const byI = new Map(q.options.map((o) => [o.i, o]));
+      let order = (answers[q.id] || '').split(',').filter((x) => x !== '').map(Number);
+      if (order.length !== q.options.length || !order.every((x) => byI.has(x))) order = q.options.map((o) => o.i);
+      answers[q.id] = order.join(',');
+      const list = el('div', { class: 'order-list' });
+      const draw = () => {
+        list.replaceChildren(...order.map((x, k) => {
+          const swap = (a, b) => { [order[a], order[b]] = [order[b], order[a]]; answers[q.id] = order.join(','); scheduleSave(); draw(); };
+          const up = el('button', { type: 'button', class: 'secondary', title: t('move_up'), onclick: () => swap(k, k - 1) }, '↑');
+          const down = el('button', { type: 'button', class: 'secondary', title: t('move_down'), onclick: () => swap(k, k + 1) }, '↓');
+          up.disabled = k === 0; down.disabled = k === order.length - 1;
+          return el('div', { class: 'order-item' }, el('span', { class: 'num' }, `${k + 1}.`), el('span', { class: 'txt' }, byI.get(x).text), up, down);
+        }));
+      };
+      draw();
+      parts.push(el('p', { class: 'muted' }, t('order_student_hint')), list);
+    }
+
     function renderQuestions(data) {
       const box = document.getElementById('questions');
       box.replaceChildren(...data.questions.map((q, i) => {
         const parts = [el('h2', {}, `${i + 1}. `, q.text)];
-        if (data.exam.type === 'quiz') {
+        const kind = q.kind || (data.exam.type === 'text' ? 'text' : 'choice');
+        if (kind === 'order') renderOrder(q, parts);
+        else if (kind === 'choice' || kind === 'truefalse') {
           q.options.forEach((opt, j) => {
-            const radio = el('input', { type: 'radio', name: 'q' + q.id, value: String(j) });
-            radio.checked = answers[q.id] === String(j);
-            radio.addEventListener('change', () => { answers[q.id] = String(j); scheduleSave(); });
-            parts.push(el('label', { class: 'choice' }, radio, ' ', opt));
+            const value = String(typeof opt === 'object' ? opt.i : j);
+            const radio = el('input', { type: 'radio', name: 'q' + q.id, value });
+            radio.checked = answers[q.id] === value;
+            radio.addEventListener('change', () => { answers[q.id] = value; scheduleSave(); });
+            parts.push(el('label', { class: 'choice' }, radio, ' ', typeof opt === 'object' ? opt.text : opt));
           });
         } else {
           const area = el('textarea', { placeholder: t('answer_placeholder') });

@@ -16,6 +16,8 @@
       <label for="title" data-i18n="exam_title"></label>
       <input type="text" id="title">
       <p class="muted" id="type"></p>
+      <label class="check"><input type="checkbox" id="shuffle"> <span data-i18n="shuffle_label"></span></label>
+      <p class="muted small" data-i18n="shuffle_hint"></p>
       <div id="meta"></div>
     </div>
     <details class="card" id="gen-box">
@@ -40,39 +42,109 @@
     const id = Number(new URLSearchParams(location.search).get('id'));
     let exam;
 
-    function blankQuestion() {
-      return exam.type === 'quiz' ? { text: '', options: ['', ''], correctIndex: 0 } : { text: '' };
+    // Какие типы вопросов можно добавить в экзамен такого типа.
+    function allowedKinds() {
+      if (exam.type === 'text') return ['text'];
+      if (exam.type === 'quiz') return ['choice', 'truefalse', 'order'];
+      return ['choice', 'truefalse', 'order', 'text'];
+    }
+
+    function blankQuestion(kind) {
+      kind = kind || (exam.type === 'text' ? 'text' : 'choice');
+      const q = { kind, text: '', points: 1 };
+      if (kind === 'choice') Object.assign(q, { options: ['', ''], correctIndex: 0 });
+      if (kind === 'truefalse') Object.assign(q, { options: [t('tf_true'), t('tf_false')], correctIndex: 0 });
+      if (kind === 'order') Object.assign(q, { options: ['', '', ''] });
+      return q;
+    }
+
+    // Смена типа: текст и баллы сохраняются, остальное — с чистого листа (варианты по возможности тоже).
+    function changeKind(q, kind) {
+      const fresh = blankQuestion(kind);
+      const keep = (q.options || []).filter((o) => o.trim());
+      if ((kind === 'choice' || kind === 'order') && q.kind !== 'truefalse' && keep.length >= 2) fresh.options = keep;
+      Object.keys(q).forEach((k) => { if (!['text', 'points', 'id'].includes(k)) delete q[k]; });
+      Object.assign(q, fresh, { text: q.text, points: q.points || 1 });
+    }
+
+    function moveBtn(label, title, onclick, disabled) {
+      const b = el('button', { type: 'button', class: 'secondary small', title, onclick }, label);
+      b.disabled = disabled;
+      return b;
+    }
+
+    function renderChoice(q, i, parts) {
+      q.options.forEach((opt, j) => {
+        const input = el('input', { type: 'text', placeholder: `${t('option')} ${j + 1}` });
+        input.value = opt;
+        input.addEventListener('input', () => { q.options[j] = input.value; });
+        const radio = el('input', { type: 'radio', name: 'correct-' + i, title: t('correct') });
+        radio.checked = q.correctIndex === j;
+        radio.addEventListener('change', () => { q.correctIndex = j; });
+        parts.push(el('div', { class: 'option' }, radio, input,
+          q.options.length > 2 ? el('button', { class: 'secondary small', onclick: () => {
+            q.options.splice(j, 1);
+            if (q.correctIndex >= q.options.length) q.correctIndex = 0;
+            render();
+          } }, '×') : null));
+      });
+      parts.push(el('p', { class: 'muted' }, '○ = ' + t('correct')));
+      parts.push(el('button', { class: 'secondary small', onclick: () => { q.options.push(''); render(); } }, t('add_option')));
+    }
+
+    function renderTrueFalse(q, i, parts) {
+      [0, 1].forEach((j) => {
+        const radio = el('input', { type: 'radio', name: 'correct-' + i, title: t('correct') });
+        radio.checked = q.correctIndex === j;
+        radio.addEventListener('change', () => { q.correctIndex = j; });
+        parts.push(el('label', { class: 'choice' }, radio, ' ', q.options[j]));
+      });
+      parts.push(el('p', { class: 'muted' }, '○ = ' + t('correct')));
+    }
+
+    function renderOrder(q, parts) {
+      parts.push(el('p', { class: 'muted' }, t('order_hint')));
+      const list = el('div', { class: 'order-list' });
+      q.options.forEach((opt, j) => {
+        const input = el('input', { type: 'text', placeholder: `${t('order_item')} ${j + 1}` });
+        input.value = opt;
+        input.addEventListener('input', () => { q.options[j] = input.value; });
+        const swap = (a, b) => { [q.options[a], q.options[b]] = [q.options[b], q.options[a]]; render(); };
+        list.append(el('div', { class: 'order-item' }, el('span', { class: 'num' }, `${j + 1}.`), input,
+          moveBtn('↑', t('move_up'), () => swap(j, j - 1), j === 0),
+          moveBtn('↓', t('move_down'), () => swap(j, j + 1), j === q.options.length - 1),
+          q.options.length > 2 ? el('button', { type: 'button', class: 'secondary small', onclick: () => { q.options.splice(j, 1); render(); } }, '×') : null));
+      });
+      parts.push(list, el('div', { class: 'row' },
+        el('button', { type: 'button', class: 'secondary small', onclick: () => { q.options.push(''); render(); } }, t('add_option')),
+        el('button', { type: 'button', class: 'secondary small', onclick: () => { q.options.reverse(); render(); } }, t('order_reverse'))));
     }
 
     function render() {
       const box = document.getElementById('questions');
+      const kinds = allowedKinds();
       box.replaceChildren(...exam.questions.map((q, i) => {
+        if (!q.kind) q.kind = kinds[0];
         const text = el('textarea', { rows: 2, style: 'min-height:60px' });
         text.value = q.text;
         text.addEventListener('input', () => { q.text = text.value; });
+        let kindSelect = null;
+        if (kinds.length > 1) {
+          kindSelect = el('select', { title: t('kind_label'), style: 'width:auto;margin:0' },
+            kinds.map((k) => el('option', { value: k }, t('kind_' + k))));
+          kindSelect.value = q.kind;
+          kindSelect.addEventListener('change', () => { changeKind(q, kindSelect.value); render(); });
+        }
         const parts = [
-          el('div', { class: 'row spread' }, el('b', {}, `${t('question')} ${i + 1}`),
+          el('div', { class: 'row spread' },
+            el('span', { class: 'row', style: 'margin:0' }, el('b', {}, `${t('question')} ${i + 1}`), kindSelect),
             el('button', { class: 'danger small', onclick: () => { exam.questions.splice(i, 1); render(); } }, t('remove'))),
           text,
         ];
-        if (exam.type === 'quiz') {
-          q.options.forEach((opt, j) => {
-            const input = el('input', { type: 'text', placeholder: `${t('option')} ${j + 1}` });
-            input.value = opt;
-            input.addEventListener('input', () => { q.options[j] = input.value; });
-            const radio = el('input', { type: 'radio', name: 'correct-' + i, title: t('correct') });
-            radio.checked = q.correctIndex === j;
-            radio.addEventListener('change', () => { q.correctIndex = j; });
-            parts.push(el('div', { class: 'option' }, radio, input,
-              q.options.length > 2 ? el('button', { class: 'secondary small', onclick: () => {
-                q.options.splice(j, 1);
-                if (q.correctIndex >= q.options.length) q.correctIndex = 0;
-                render();
-              } }, '×') : null));
-          });
-          parts.push(el('p', { class: 'muted' }, '○ = ' + t('correct')));
-          parts.push(el('button', { class: 'secondary small', onclick: () => { q.options.push(''); render(); } }, t('add_option')));
-        } else {
+        if (q.kind === 'choice') renderChoice(q, i, parts);
+        else if (q.kind === 'truefalse') renderTrueFalse(q, i, parts);
+        else if (q.kind === 'order') renderOrder(q, parts);
+        else {
           const ref = el('textarea', { rows: 2, style: 'min-height:60px', placeholder: t('reference_placeholder') });
           ref.value = q.reference || '';
           ref.addEventListener('input', () => { q.reference = ref.value; });
@@ -100,7 +172,11 @@
       };
     }
 
-    document.getElementById('add').addEventListener('click', () => { exam.questions.push(blankQuestion()); render(); });
+    document.getElementById('add').addEventListener('click', () => {
+      const last = exam.questions[exam.questions.length - 1];
+      exam.questions.push(blankQuestion(last && last.kind));
+      render();
+    });
     document.getElementById('save').addEventListener('click', withErrors(async () => {
       await save();
       const msg = document.getElementById('msg');
@@ -141,6 +217,7 @@
       let saved = 'free';
       try { saved = localStorage.getItem('aiQuality') || 'free'; } catch {}
       if (saved === 'paid') model.value = 'paid';
+      const genKind = el('select', {}, el('option', { value: 'quiz' }, t('type_quiz')), el('option', { value: 'text' }, t('type_text')));
       const msg = el('span', { class: 'muted' });
       const btn = el('button', { type: 'button' }, t('gen_btn'));
       btn.addEventListener('click', async () => {
@@ -150,12 +227,13 @@
         try {
           const res = await callFunction('grade', {
             action: 'generate', materialId: Number(material.value), count: Number(count.value) || 5,
-            examType: exam.type, lang: lang.value, wishes: wishes.value,
+            examType: exam.type === 'mixed' ? genKind.value : exam.type, lang: lang.value, wishes: wishes.value,
             quality: model.value === 'paid' ? 'paid' : (saved.startsWith('free:') ? saved : 'free'),
           });
           // Пустые вопросы-заготовки убираем, новые добавляем в конец.
           exam.questions = exam.questions.filter((q) => q.text.trim());
-          exam.questions.push(...res.questions);
+          const genType = exam.type === 'mixed' ? genKind.value : exam.type;
+          exam.questions.push(...res.questions.map((q) => ({ kind: genType === 'text' ? 'text' : 'choice', ...q })));
           render();
           msg.className = 'ok'; msg.textContent = t('gen_done').replace('{n}', res.questions.length);
         } catch (err) {
@@ -167,7 +245,8 @@
         el('div', { class: 'row', style: 'margin-top:8px' },
           el('label', { class: 'row', style: 'margin:0' }, t('gen_count'), count),
           el('label', { class: 'row', style: 'margin:0' }, t('gen_lang'), lang),
-          el('label', { class: 'row', style: 'margin:0' }, t('ai_model'), model)),
+          el('label', { class: 'row', style: 'margin:0' }, t('ai_model'), model),
+          exam.type === 'mixed' ? el('label', { class: 'row', style: 'margin:0' }, t('gen_kind'), genKind) : null),
         el('label', {}, t('gen_wishes')), wishes,
         el('div', { class: 'row', style: 'margin-top:12px' }, btn, msg));
     }
@@ -176,7 +255,13 @@
       exam = await rpc('get_exam', { p_exam_id: id });
       if (exam.status !== 'draft') { location.href = 'monitor.html?id=' + id; return; }
       document.getElementById('title').value = exam.title;
-      document.getElementById('type').textContent = t(exam.type === 'quiz' ? 'type_quiz' : 'type_text');
+      document.getElementById('type').textContent = t('type_' + exam.type);
+      const shuffle = document.getElementById('shuffle');
+      shuffle.checked = !!exam.shuffle;
+      shuffle.addEventListener('change', withErrors(async () => {
+        await rpc('set_exam_shuffle', { p_exam_id: id, p_shuffle: shuffle.checked });
+        exam.shuffle = shuffle.checked;
+      }));
       if (!exam.questions.length) exam.questions.push(blankQuestion());
       render();
       renderExamMeta(document.getElementById('meta'), exam).catch(showPageError);

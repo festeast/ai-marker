@@ -80,7 +80,7 @@
     function renderParticipants(data) {
       const box = document.getElementById('participants');
       if (!data.participants.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_participants'))); return; }
-      const isQuiz = data.exam.type === 'quiz';
+      const isQuiz = data.exam.type !== 'text';
       const head = el('tr', {}, ['col_student', 'col_status', 'col_left', 'col_away', 'col_pastes', 'col_answered']
         .concat(isQuiz ? ['col_score'] : []).map((k) => el('th', {}, t(k))));
       const rows = data.participants.map((p) => el('tr', { class: p.leaveCount || p.largePasteCount ? 'flagged' : '' },

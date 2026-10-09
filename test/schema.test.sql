@@ -207,6 +207,61 @@ set role anon;
 select pg_temp.expect_error($$ select teacher_stats() $$, 'unauthorized');
 select pg_temp.expect_error($$ select list_materials() $$, 'unauthorized');
 
+-- ---------- смешанный экзамен: «верно/неверно», «по порядку», открытый вопрос, перемешивание ----------
+reset role;
+reset request.jwt.claim.sub;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (create_exam('Смешанный', 'mixed', true)->>'id')::bigint as mix_id \gset
+select pg_temp.check((get_exam(:mix_id)->>'shuffle')::boolean, 'перемешивание включено');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'С', '[{"kind":"essay","text":"x"}]') $$, :mix_id), 'invalid_kind');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'С', '[{"kind":"truefalse","text":"x","options":["a","b","c"],"correctIndex":0}]') $$, :mix_id), 'quiz_needs_options');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'С', '[{"kind":"order","text":"x","options":["a"]}]') $$, :mix_id), 'quiz_needs_options');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Т', '[{"kind":"text","text":"x"}]') $$, :exam_id), 'exam_locked');
+select save_exam(:mix_id, 'Смешанный', '[
+  {"kind":"choice","text":"Столица Казахстана","options":["Астана","Алматы","Шымкент"],"correctIndex":0,"points":1},
+  {"kind":"truefalse","text":"Вода кипит при 100°C","options":["Верно","Неверно"],"correctIndex":0,"points":1},
+  {"kind":"order","text":"По возрастанию","options":["1","5","10","50"],"points":2},
+  {"kind":"text","text":"Что такое фотосинтез?","reference":"свет, хлорофилл","points":3}]'::jsonb) as mix \gset
+select pg_temp.check((select string_agg(q->>'kind', ',') from jsonb_array_elements((:'mix'::jsonb)->'questions') q) = 'choice,truefalse,order,text', 'виды вопросов сохранены');
+select pg_temp.check((:'mix'::jsonb)->'questions'->2->'options' = '["1","5","10","50"]', 'порядок вариантов сохранён');
+select publish_exam(:mix_id)->>'code' as mix_code \gset
+select (q->>'id')::bigint as q_choice from jsonb_array_elements((:'mix'::jsonb)->'questions') q where q->>'kind' = 'choice' \gset
+select (q->>'id')::bigint as q_tf from jsonb_array_elements((:'mix'::jsonb)->'questions') q where q->>'kind' = 'truefalse' \gset
+select (q->>'id')::bigint as q_order from jsonb_array_elements((:'mix'::jsonb)->'questions') q where q->>'kind' = 'order' \gset
+select (q->>'id')::bigint as q_text from jsonb_array_elements((:'mix'::jsonb)->'questions') q where q->>'kind' = 'text' \gset
+
+reset request.jwt.claim.sub;
+set role anon;
+select join_exam(:'mix_code', 'Айдана') as t1 \gset
+select join_exam(:'mix_code', 'Бауыржан') as t2 \gset
+select get_attempt(:'t1') as a1 \gset
+select pg_temp.check(jsonb_array_length((:'a1'::jsonb)->'questions') = 4, 'ученик видит 4 вопроса');
+select pg_temp.check(not exists (select 1 from jsonb_array_elements((:'a1'::jsonb)->'questions') q where q ? 'correctIndex' or q ? 'reference'), 'ответы скрыты');
+select pg_temp.check((select (select string_agg(o->>'i', ',') from jsonb_array_elements(q->'options') o) <> '0,1,2,3'
+  from jsonb_array_elements((:'a1'::jsonb)->'questions') q where q->>'kind' = 'order'), 'порядок перемешан');
+select pg_temp.check((select string_agg(o->>'text', ',' order by (o->>'i')::int) from jsonb_array_elements((:'a1'::jsonb)->'questions') q,
+  jsonb_array_elements(q->'options') o where q->>'kind' = 'order') = '1,5,10,50', 'варианты помечены номерами учителя');
+select pg_temp.check(get_attempt(:'t1')->'questions' = (:'a1'::jsonb)->'questions', 'перемешивание не меняется при перезагрузке');
+select submit_attempt(:'t1', jsonb_build_object(:'q_choice', '0', :'q_tf', '0', :'q_order', '0,1,2,3', :'q_text', 'Свет и хлорофилл'));
+select submit_attempt(:'t2', jsonb_build_object(:'q_choice', '1', :'q_tf', '1', :'q_order', '3,2,1,0'));
+
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select exam_results(:mix_id) as mr \gset
+select pg_temp.check((select p->>'total' from jsonb_array_elements((:'mr'::jsonb)->'participants') p where p->>'name' = 'Айдана') = '4', 'автопроверка: 1 + 1 + 2');
+select pg_temp.check((select p->>'gradedCount' from jsonb_array_elements((:'mr'::jsonb)->'participants') p where p->>'name' = 'Айдана') = '3', 'открытый вопрос ещё не оценён');
+select pg_temp.check((select p->>'total' from jsonb_array_elements((:'mr'::jsonb)->'participants') p where p->>'name' = 'Бауыржан') = '0', 'неверные ответы — 0');
+select pg_temp.check((select (m->'score'->>'correct') || '/' || (m->'score'->>'total') from jsonb_array_elements(exam_monitor(:mix_id, 0)->'participants') m where m->>'name' = 'Айдана') = '3/3', 'мониторинг считает тестовые вопросы');
+select (p->>'id')::bigint as pid1 from jsonb_array_elements((:'mr'::jsonb)->'participants') p where p->>'name' = 'Айдана' \gset
+select pg_temp.expect_error(format('select set_grade(%s, %s, 1)', :pid1, :q_choice), 'not_gradable');
+select set_grade(:pid1, :q_text, 2.5);
+select pg_temp.check(save_ai_grades(:mix_id, jsonb_build_array(jsonb_build_object('participantId', :pid1, 'questionId', :q_choice, 'score', 1))) = 0, 'ИИ не оценивает тестовые вопросы');
+select pg_temp.check((select p->>'total' from jsonb_array_elements(exam_results(:mix_id)->'participants') p where p->>'name' = 'Айдана') = '6.5', 'итог с оценкой учителя');
+select pg_temp.check((select e->>'avgPercent' from jsonb_array_elements(teacher_stats()->'exams') e where (e->>'id')::bigint = :mix_id) = '92.9', 'средний процент смешанного экзамена');
+select pg_temp.check(not (set_exam_shuffle(:mix_id, false)->>'shuffle')::boolean, 'перемешивание выключено');
+
 -- администратор
 reset role;
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
@@ -219,7 +274,7 @@ set role authenticated;
 select pg_temp.check(is_admin(), 'A стал администратором');
 select admin_users() as au \gset
 select pg_temp.check(((:'au'::jsonb)->'totals'->>'users')::int = 2, 'всего пользователей');
-select pg_temp.check(((:'au'::jsonb)->'totals'->>'exams')::int = 3, 'всего экзаменов');
+select pg_temp.check(((:'au'::jsonb)->'totals'->>'exams')::int = 4, 'всего экзаменов');
 select pg_temp.check((select (u->>'isAdmin')::boolean from jsonb_array_elements((:'au'::jsonb)->'users') u
   where u->>'id' = '11111111-1111-1111-1111-111111111111'), 'отмечен администратор');
 select pg_temp.check((select (u->>'exams')::int from jsonb_array_elements((:'au'::jsonb)->'users') u

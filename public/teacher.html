@@ -19,7 +19,10 @@
         <div class="type-choice">
           <label><input type="radio" name="type" value="quiz" checked><b data-i18n="type_quiz"></b><br><span class="muted" data-i18n="type_quiz_hint"></span></label>
           <label><input type="radio" name="type" value="text"><b data-i18n="type_text"></b><br><span class="muted" data-i18n="type_text_hint"></span></label>
+          <label><input type="radio" name="type" value="mixed"><b data-i18n="type_mixed"></b><br><span class="muted" data-i18n="type_mixed_hint"></span></label>
         </div>
+        <label class="check"><input type="checkbox" id="shuffle"> <span data-i18n="shuffle_label"></span></label>
+        <p class="muted small" data-i18n="shuffle_hint"></p>
         <div class="error" id="err"></div>
         <button type="submit" data-i18n="create"></button>
       </form>
@@ -36,7 +39,7 @@
       list.replaceChildren();
       if (!exams.length) { list.append(el('p', { class: 'muted' }, t('no_exams'))); return; }
       const rows = exams.map((x) => el('tr', {},
-        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'),
+        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t('type_' + x.type),
           x.className ? ` · ${t('class_name')} ${x.className}` : '')),
         el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
         el('td', {}, x.code ? el('code', {}, x.code) : '—'),
@@ -55,6 +58,7 @@
         const exam = await rpc('create_exam', {
           p_title: document.getElementById('title').value,
           p_type: document.querySelector('input[name=type]:checked').value,
+          p_shuffle: document.getElementById('shuffle').checked,
         });
         location.href = 'edit.html?id=' + exam.id;
       } catch (err) { document.getElementById('err').textContent = err.message; }

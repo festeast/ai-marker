@@ -57,7 +57,7 @@
       if (!exams.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_exams'))); return; }
       const head = el('tr', {}, [t('exam_title'), t('class_name'), t('col_status'), t('date'), t('submitted_works'), t('avg_result'), ''].map((h) => el('th', {}, h)));
       const rows = exams.map((x) => el('tr', {},
-        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t(x.type === 'quiz' ? 'type_quiz' : 'type_text'))),
+        el('td', {}, el('b', {}, x.title), el('br'), el('span', { class: 'muted' }, t('type_' + x.type))),
         el('td', {}, x.className || '—'),
         el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
         el('td', {}, new Date(x.publishedAt || x.createdAt).toLocaleDateString(LOCALE)),

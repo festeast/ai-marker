@@ -137,17 +137,25 @@
     }
 
     function renderStudents() {
-      const isQuiz = data.exam.type === 'quiz';
+      const hasText = data.questions.some((q) => (q.kind || 'text') === 'text');
       document.getElementById('students').replaceChildren(...data.participants.map((p) => {
         const items = data.questions.map((q, i) => {
           const a = p.answers[q.id] || {};
+          const kind = q.kind || (data.exam.type === 'quiz' ? 'choice' : 'text');
           const parts = [el('div', { class: 'row spread' },
             el('b', {}, `${i + 1}. ${q.text}`),
             el('span', { class: 'muted' }, `${fmtScore(a.score)} / ${q.points}`))];
-          if (isQuiz) {
-            const chosen = a.value !== undefined ? q.options[Number(a.value)] : null;
+          if (kind === 'order') {
+            const ok = a.value === q.options.map((_, k) => k).join(',');
+            const mine = a.value ? a.value.split(',').map((k) => q.options[Number(k)]) : null;
+            const list = (items, cls) => el('ol', { class: cls, style: 'margin:4px 0' }, items.map((x) => el('li', {}, x)));
+            parts.push(el('p', { style: 'margin-bottom:0' }, `${t('student_order')}: `, mine ? el('span', { class: ok ? 'ok' : 'error' }, ok ? '✓' : '✗') : el('span', { class: 'muted' }, t('no_answer'))));
+            if (mine) parts.push(list(mine, ok ? 'ok' : ''));
+            if (!ok) parts.push(el('p', { class: 'muted', style: 'margin-bottom:0' }, `${t('correct_order')}:`), list(q.options, 'muted'));
+          } else if (kind !== 'text') {
+            const chosen = a.value !== undefined && a.value !== null && a.value !== '' ? q.options[Number(a.value)] : null;
             const ok = a.value === String(q.correctIndex);
-            parts.push(el('p', {}, `${t('answer')}: `, chosen === null ? el('span', { class: 'muted' }, t('no_answer')) : el('span', { class: ok ? 'ok' : 'error' }, (ok ? '✓ ' : '✗ ') + chosen)));
+            parts.push(el('p', {}, `${t('answer')}: `, chosen == null ? el('span', { class: 'muted' }, t('no_answer')) : el('span', { class: ok ? 'ok' : 'error' }, (ok ? '✓ ' : '✗ ') + chosen)));
             if (!ok) parts.push(el('p', { class: 'muted' }, `${t('correct_answer')}: ${q.options[q.correctIndex]}`));
           } else {
             parts.push(a.value ? el('span', { class: 'snippet' }, a.value) : el('p', { class: 'muted' }, t('no_answer')));
@@ -156,7 +164,7 @@
           }
           return el('div', { class: 'question' }, parts);
         });
-        const aiOne = !isQuiz && p.submittedAt ? el('button', { class: 'secondary small', onclick: (e) => gradeWithAi([p], e.target) }, t('ai_grade_one')) : null;
+        const aiOne = hasText && p.submittedAt ? el('button', { class: 'secondary small', onclick: (e) => gradeWithAi([p], e.target) }, t('ai_grade_one')) : null;
         return el('div', { class: 'card', id: 'p' + p.id },
           el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, p.name),
             el('span', { class: 'row' }, aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
@@ -226,7 +234,7 @@
       renderStudents();
       const meta = data.exam.className ? `${t('class_name')}: ${data.exam.className}` : '';
       document.getElementById('meta-summary').textContent = [meta, data.materials.length ? `${t('exam_materials')}: ${data.materials.length}` : ''].filter(Boolean).join(' · ');
-      document.getElementById('ai-box').hidden = data.exam.type !== 'text' || !data.participants.some((p) => p.submittedAt);
+      document.getElementById('ai-box').hidden = !data.questions.some((q) => q.kind === 'text') || !data.participants.some((p) => p.submittedAt);
     }
 
     requireLogin().then(load).then(async () => {

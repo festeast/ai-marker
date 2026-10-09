@@ -14,7 +14,10 @@ async function requireLogin() {
 }
 
 function teacherHeader() {
-  return `<header><div class="wrap"><a class="brand" href="teacher.html">${t('app_name')} · ${t('my_exams')}</a>
+  const page = location.pathname.split('/').pop();
+  const link = (href, key) => `<a href="${href}"${page === href ? ' class="active"' : ''}>${t(key)}</a>`;
+  return `<header><div class="wrap"><a class="brand" href="index.html">${t('app_name')}</a>
+    <nav class="nav">${link('teacher.html', 'my_exams')}${link('library.html', 'library')}${link('profile.html', 'profile')}</nav>
     <span class="row"><span class="badge" id="ai-usage" hidden></span><span class="muted" id="me"></span><button class="secondary small" id="logout">${t('logout')}</button></span></div></header>`;
 }
 
@@ -50,4 +53,52 @@ async function refreshAiUsage() {
 function showPageError(err) {
   const box = document.getElementById('err');
   if (box) box.textContent = err.message;
+}
+
+// Процент → оценка по 5-балльной шкале (критериальное оценивание: 85 / 65 / 40 %).
+function gradeFor(pct) {
+  if (pct === null || pct === undefined) return null;
+  return pct >= 85 ? 5 : pct >= 65 ? 4 : pct >= 40 ? 3 : 2;
+}
+function pctClass(pct) {
+  return pct === null || pct === undefined ? 'muted' : pct >= 65 ? 'pct-good' : pct >= 40 ? 'pct-mid' : 'pct-bad';
+}
+function fmtPct(pct) {
+  return pct === null || pct === undefined ? '—' : Math.round(Number(pct)) + '%';
+}
+
+// Блок «Класс и материалы для ИИ» экзамена. Сохраняется сразу при изменении.
+async function renderExamMeta(box, exam) {
+  const [classes, materials] = await Promise.all([rpc('list_classes'), rpc('list_materials')]);
+  const selected = new Set(exam.materialIds || []);
+  const msg = el('span', { class: 'muted' });
+  const listId = 'classes-' + exam.id;
+  const cls = el('input', { type: 'text', list: listId, maxlength: 50, placeholder: t('class_placeholder'), style: 'max-width:240px' });
+  cls.value = exam.className || '';
+
+  async function save() {
+    msg.className = 'muted'; msg.textContent = '';
+    try {
+      const res = await rpc('update_exam_meta', { p_exam_id: exam.id, p_class_name: cls.value, p_material_ids: [...selected] });
+      exam.className = res.className; exam.materialIds = res.materialIds;
+      msg.className = 'ok'; msg.textContent = t('saved');
+      setTimeout(() => { if (msg.textContent === t('saved')) msg.textContent = ''; }, 2000);
+    } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
+  }
+  cls.addEventListener('change', save);
+
+  const checks = materials.length
+    ? el('div', { class: 'check-list' }, materials.map((m) => {
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = selected.has(m.id);
+        cb.addEventListener('change', () => { if (cb.checked) selected.add(m.id); else selected.delete(m.id); save(); });
+        return el('label', {}, cb, el('span', {}, m.title, m.topic ? el('span', { class: 'muted' }, ' · ' + m.topic) : null,
+          !m.content ? el('span', { class: 'muted' }, ' · ' + t('material_file_only')) : null));
+      }))
+    : el('p', { class: 'muted' }, t('library_empty_hint'), ' ', el('a', { href: 'library.html' }, t('library')));
+
+  box.replaceChildren(
+    el('label', {}, t('class_name')), el('div', { class: 'row' }, cls, msg),
+    el('datalist', { id: listId }, classes.map((c) => el('option', { value: c }))),
+    el('label', {}, t('exam_materials')), el('p', { class: 'muted', style: 'margin:0 0 6px' }, t('exam_materials_hint')), checks);
 }

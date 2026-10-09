@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Библиотека — AI Marker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <h2 id="form-title" data-i18n="material_new"></h2>
+      <p class="muted" data-i18n="library_intro"></p>
+      <form id="form">
+        <label for="m-title" data-i18n="material_title"></label>
+        <input type="text" id="m-title" maxlength="200" required>
+        <label for="m-topic" data-i18n="material_topic"></label>
+        <input type="text" id="m-topic" maxlength="100" list="topics" data-i18n-placeholder="material_topic_placeholder">
+        <datalist id="topics"></datalist>
+        <label for="m-content" data-i18n="material_content"></label>
+        <textarea id="m-content" rows="6" data-i18n-placeholder="material_content_placeholder"></textarea>
+        <label for="m-file" data-i18n="material_file"></label>
+        <input type="file" id="m-file" accept=".pdf,.doc,.docx,.txt,.md,.ppt,.pptx,.xls,.xlsx,.jpg,.jpeg,.png">
+        <p class="muted" id="current-file" hidden></p>
+        <p class="muted" data-i18n="material_file_hint"></p>
+        <div class="row">
+          <button type="submit" id="save" data-i18n="save"></button>
+          <button type="button" class="secondary" id="cancel" data-i18n="cancel" hidden></button>
+          <span id="msg"></span>
+        </div>
+        <div class="error" id="form-err"></div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="row spread">
+        <h2 style="margin:0" data-i18n="library"></h2>
+        <span class="row">
+          <input type="text" id="search" data-i18n-placeholder="search" style="width:200px">
+          <select id="topic-filter"></select>
+        </span>
+      </div>
+      <div id="list" style="margin-top:12px"></div>
+    </div>
+    <div class="error" id="err"></div>
+  </main>
+  <script>
+    let materials = [];
+    let editing = null;   // материал, который сейчас редактируется
+    let userId;
+    const form = {
+      title: document.getElementById('m-title'), topic: document.getElementById('m-topic'),
+      content: document.getElementById('m-content'), file: document.getElementById('m-file'),
+    };
+
+    // Имя файла в Storage — только латиница и цифры; настоящее имя хранится в базе.
+    function storagePath(file) {
+      const ext = (file.name.match(/\.[A-Za-z0-9]{1,8}$/) || [''])[0].toLowerCase();
+      return `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+    }
+
+    async function uploadFile(file) {
+      if (file.size > 10 * 1024 * 1024) throw appError('file_too_big');
+      const path = storagePath(file);
+      const { error } = await db.storage.from('library').upload(path, file, { contentType: file.type || undefined });
+      if (error) { console.error(error); throw appError('upload_failed'); }
+      return path;
+    }
+
+    async function removeFile(path) {
+      if (path) await db.storage.from('library').remove([path]).catch(() => {});
+    }
+
+    async function openFile(m) {
+      // Окно открываем сразу по клику, иначе браузер может его заблокировать.
+      const win = window.open('', '_blank');
+      const { data, error } = await db.storage.from('library').createSignedUrl(m.filePath, 300);
+      if (error) { if (win) win.close(); document.getElementById('err').textContent = t('err_file_open'); return; }
+      if (win) win.location.href = data.signedUrl; else location.href = data.signedUrl;
+    }
+
+    // Текст из .txt/.md подставляем в поле сразу — его прочитает ИИ.
+    form.file.addEventListener('change', async () => {
+      const f = form.file.files[0];
+      if (f && /\.(txt|md)$/i.test(f.name) && !form.content.value.trim() && f.size < 500000) form.content.value = await f.text();
+      if (f && !form.title.value.trim()) form.title.value = f.name.replace(/\.[^.]+$/, '');
+    });
+
+    function resetForm() {
+      editing = null;
+      document.getElementById('form').reset();
+      document.getElementById('form-title').textContent = t('material_new');
+      document.getElementById('cancel').hidden = true;
+      document.getElementById('current-file').hidden = true;
+      document.getElementById('form-err').textContent = '';
+    }
+
+    function startEdit(m) {
+      editing = m;
+      form.title.value = m.title; form.topic.value = m.topic || ''; form.content.value = m.content || ''; form.file.value = '';
+      document.getElementById('form-title').textContent = t('material_edit');
+      document.getElementById('cancel').hidden = false;
+      const cur = document.getElementById('current-file');
+      cur.hidden = !m.fileName;
+      cur.textContent = m.fileName ? `${t('material_current_file')}: ${m.fileName}` : '';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    document.getElementById('cancel').addEventListener('click', resetForm);
+    document.getElementById('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errBox = document.getElementById('form-err');
+      const btn = document.getElementById('save');
+      errBox.textContent = ''; btn.disabled = true;
+      let uploaded = null;
+      try {
+        const f = form.file.files[0];
+        if (!form.content.value.trim() && !f && !(editing && editing.filePath)) throw appError('material_empty');
+        if (f) uploaded = await uploadFile(f);
+        const filePath = uploaded || (editing && editing.filePath) || null;
+        const fileName = f ? f.name : (editing && editing.fileName) || null;
+        await rpc('save_material', {
+          p_id: editing ? editing.id : null, p_title: form.title.value, p_topic: form.topic.value,
+          p_content: form.content.value, p_file_path: filePath, p_file_name: fileName,
+        });
+        if (uploaded && editing && editing.filePath) await removeFile(editing.filePath);  // старый файл заменён
+        uploaded = null;
+        resetForm();
+        const msg = document.getElementById('msg');
+        msg.className = 'ok'; msg.textContent = t('saved');
+        setTimeout(() => { msg.textContent = ''; }, 2000);
+        await load();
+      } catch (err) {
+        if (uploaded) await removeFile(uploaded);
+        errBox.textContent = err.message;
+      } finally { btn.disabled = false; }
+    });
+
+    function render() {
+      const q = document.getElementById('search').value.trim().toLowerCase();
+      const topic = document.getElementById('topic-filter').value;
+      const shown = materials.filter((m) => (!topic || (m.topic || '') === topic)
+        && (!q || [m.title, m.topic, m.content, m.fileName].some((v) => v && v.toLowerCase().includes(q))));
+      const list = document.getElementById('list');
+      if (!materials.length) { list.replaceChildren(el('p', { class: 'muted' }, t('library_empty'))); return; }
+      if (!shown.length) { list.replaceChildren(el('p', { class: 'muted' }, t('nothing_found'))); return; }
+      list.replaceChildren(...shown.map((m) => el('div', { class: 'material' },
+        el('div', { class: 'row spread' },
+          el('span', {}, el('b', {}, m.title), m.topic ? el('span', { class: 'badge', style: 'margin-left:8px' }, m.topic) : null),
+          el('span', { class: 'row' },
+            m.filePath ? el('button', { class: 'secondary small', onclick: () => openFile(m) }, '📎 ' + (m.fileName || t('material_file'))) : null,
+            el('button', { class: 'secondary small', onclick: () => startEdit(m) }, t('edit')),
+            el('button', { class: 'danger small', onclick: async () => {
+              if (!confirm(t('material_delete_q'))) return;
+              try {
+                const res = await rpc('delete_material', { p_id: m.id });
+                await removeFile(res.filePath);
+                if (editing && editing.id === m.id) resetForm();
+                await load();
+              } catch (err) { document.getElementById('err').textContent = err.message; }
+            } }, t('remove')))),
+        el('p', { class: 'muted', style: 'margin:4px 0 0' },
+          m.examCount ? `${t('material_used')}: ${m.examCount}` : t('material_unused'),
+          !m.content ? ' · ' + t('material_file_only') : ''),
+        m.content ? el('div', { class: 'content' }, m.content.length > 1500 ? m.content.slice(0, 1500) + '…' : m.content) : null)));
+    }
+
+    async function load() {
+      materials = await rpc('list_materials');
+      const topics = [...new Set(materials.map((m) => m.topic).filter(Boolean))].sort();
+      const filter = document.getElementById('topic-filter');
+      const cur = filter.value;
+      filter.replaceChildren(el('option', { value: '' }, t('all_topics')), ...topics.map((x) => el('option', { value: x }, x)));
+      filter.value = topics.includes(cur) ? cur : '';
+      document.getElementById('topics').replaceChildren(...topics.map((x) => el('option', { value: x })));
+      render();
+    }
+
+    document.getElementById('search').addEventListener('input', render);
+    document.getElementById('topic-filter').addEventListener('change', render);
+    requireLogin().then((user) => { userId = user.id; return load(); }).catch(showPageError);
+  </script>
+</body>
+</html>

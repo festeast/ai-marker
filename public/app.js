@@ -88,15 +88,14 @@ function applyI18n(root = document) {
   if (root === document) { document.documentElement.lang = LANG; addLangSwitch(); }
 }
 
-// Переключатель «Рус | Қаз» в шапке. Выбор запоминается в браузере.
+// Выбор языка в шапке (русский, казахский, английский, турецкий). Выбор запоминается в браузере.
 function addLangSwitch() {
   const bar = document.querySelector('header .wrap');
   if (!bar || bar.querySelector('.lang-switch')) return;
-  const box = el('span', { class: 'lang-switch', role: 'group', 'aria-label': t('lang_switch') },
-    ['ru', 'kk'].map((code) => el('button', {
-      type: 'button', class: code === LANG ? 'active' : '', 'aria-pressed': String(code === LANG),
-      onclick: () => { if (code !== LANG) setLang(code); },
-    }, t('lang_' + code))));
+  const box = el('select', { class: 'lang-switch', 'aria-label': t('lang_switch'), title: t('lang_switch') },
+    Object.keys(I18N).map((code) => el('option', { value: code }, t('lang_' + code))));
+  box.value = LANG;
+  box.addEventListener('change', () => setLang(box.value));
   const right = bar.querySelector(':scope > .row');
   if (right) right.prepend(box); else bar.append(box);
 }

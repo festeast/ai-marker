@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="code-runner.js"></script>
 </head>
 <body>
   <header><div class="wrap"><span class="brand" data-i18n="app_name"></span><span class="muted" id="who"></span></div></header>
@@ -227,12 +228,44 @@
       parts.push(el('p', { class: 'muted' }, t('order_student_hint')), list);
     }
 
+    // Вопрос с кодом: редактор, ввод для запуска и кнопка «Запустить». Ответ — сам код.
+    function renderCode(q, parts) {
+      const area = CodeRunner.editor(el('textarea', { rows: 14, 'aria-label': t('answer') }));
+      area.value = answers[q.id] ?? q.starter ?? '';
+      area.addEventListener('input', () => { answers[q.id] = area.value; scheduleSave(); });
+      area.addEventListener('focus', () => CodeRunner.preload(q.lang), { once: true });
+      const stdin = el('textarea', { class: 'code-small', rows: 3, spellcheck: 'false' });
+      const status = el('span', { class: 'muted' });
+      const out = el('div');
+      const btn = el('button', { type: 'button', class: 'secondary' }, t('code_run'));
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        status.className = 'muted';
+        out.replaceChildren();
+        try {
+          const res = await CodeRunner.run(q.lang, area.value, [stdin.value], (k) => { status.textContent = t(k); }, { echo: true });
+          out.replaceChildren(CodeRunner.resultView(res));
+          status.textContent = t('code_finished');
+        } catch (err) {
+          status.className = 'error';
+          status.textContent = err.message;
+        } finally { btn.disabled = false; }
+      });
+      parts.push(
+        el('p', { class: 'muted' }, el('span', { class: 'badge' }, CodeRunner.langName(q.lang)), ' ', t('code_student_hint')),
+        area,
+        el('details', { style: 'margin-top:8px' }, el('summary', { class: 'muted' }, t('code_stdin')), stdin),
+        el('div', { class: 'row', style: 'margin-top:8px' }, btn, status),
+        out);
+    }
+
     function renderQuestions(data) {
       const box = document.getElementById('questions');
       box.replaceChildren(...data.questions.map((q, i) => {
         const parts = [el('h2', {}, `${i + 1}. `, q.text)];
         const kind = q.kind || (data.exam.type === 'text' ? 'text' : 'choice');
         if (kind === 'order') renderOrder(q, parts);
+        else if (kind === 'code') renderCode(q, parts);
         else if (kind === 'choice' || kind === 'truefalse') {
           q.options.forEach((opt, j) => {
             const value = String(typeof opt === 'object' ? opt.i : j);

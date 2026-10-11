@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
-  <script src="teacher-common.js"></script>
+  <script src="teacher-common.js"></script><script src="code-runner.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -44,9 +44,9 @@
 
     // Какие типы вопросов можно добавить в экзамен такого типа.
     function allowedKinds() {
-      if (exam.type === 'text') return ['text'];
+      if (exam.type === 'text') return ['text', 'code'];
       if (exam.type === 'quiz') return ['choice', 'truefalse', 'order'];
-      return ['choice', 'truefalse', 'order', 'text'];
+      return ['choice', 'truefalse', 'order', 'text', 'code'];
     }
 
     function blankQuestion(kind) {
@@ -55,6 +55,7 @@
       if (kind === 'choice') Object.assign(q, { options: ['', ''], correctIndex: 0 });
       if (kind === 'truefalse') Object.assign(q, { options: [t('tf_true'), t('tf_false')], correctIndex: 0 });
       if (kind === 'order') Object.assign(q, { options: ['', '', ''] });
+      if (kind === 'code') Object.assign(q, { lang: 'python', starter: CodeRunner.starter('python'), tests: [{ input: '', output: '' }] });
       return q;
     }
 
@@ -120,6 +121,73 @@
         el('button', { type: 'button', class: 'secondary small', onclick: () => { q.options.reverse(); render(); } }, t('order_reverse'))));
     }
 
+    // Вопрос с кодом: язык, заготовка, эталонное решение и тесты (ввод → ожидаемый вывод).
+    const codeNotes = new WeakMap(); // сообщение под тестами переживает перерисовку
+    function renderCode(q, parts) {
+      if (!q.tests) q.tests = [];
+      const lang = el('select', { style: 'width:auto;margin:0' }, CodeRunner.LANGS.map((l) => el('option', { value: l }, CodeRunner.langName(l))));
+      lang.value = q.lang || 'python';
+      lang.addEventListener('change', () => {
+        const old = q.lang;
+        q.lang = lang.value;
+        if (!(q.starter || '').trim() || q.starter === CodeRunner.starter(old)) q.starter = CodeRunner.starter(q.lang);
+        render();
+      });
+      const starter = CodeRunner.editor(el('textarea', { rows: 6 }));
+      starter.value = q.starter || '';
+      starter.addEventListener('input', () => { q.starter = starter.value; });
+      const ref = CodeRunner.editor(el('textarea', { rows: 6, placeholder: t('code_reference_placeholder') }));
+      ref.value = q.reference || '';
+      ref.addEventListener('input', () => { q.reference = ref.value; });
+
+      const tests = q.tests.map((tc, j) => {
+        const input = el('textarea', { class: 'code-small', rows: 2, spellcheck: 'false' });
+        input.value = tc.input || '';
+        input.addEventListener('input', () => { tc.input = input.value; });
+        const output = el('textarea', { class: 'code-small', rows: 2, spellcheck: 'false' });
+        output.value = tc.output || '';
+        output.addEventListener('input', () => { tc.output = output.value; });
+        return el('div', { class: 'test-row' }, el('span', { class: 'num' }, `${j + 1}.`),
+          el('div', {}, el('label', {}, t('code_test_input')), input),
+          el('div', {}, el('label', {}, t('code_test_output')), output),
+          el('button', { type: 'button', class: 'secondary small', style: 'margin-top:24px', title: t('remove'), onclick: () => { q.tests.splice(j, 1); render(); } }, '×'));
+      });
+
+      const note = codeNotes.get(q);
+      const msg = el('span', { class: note ? note.cls : 'muted' }, note ? note.text : '');
+      const setMsg = (cls, text) => { codeNotes.set(q, { cls, text }); msg.className = cls; msg.textContent = text; };
+      const fill = el('button', { type: 'button', class: 'secondary small' }, t('code_fill_outputs'));
+      fill.addEventListener('click', async () => {
+        if (!(q.reference || '').trim()) { setMsg('error', t('code_no_reference')); return; }
+        if (!q.tests.length) q.tests.push({ input: '', output: '' });
+        fill.disabled = true;
+        try {
+          const res = await CodeRunner.run(q.lang, q.reference, q.tests.map((x) => x.input || ''), (k) => setMsg('muted', t(k)));
+          if (res.compileError) { setMsg('error', t('code_compile_error') + ': ' + res.compileError.slice(0, 500)); return; }
+          const bad = [];
+          res.results.forEach((r, i) => {
+            q.tests[i].output = r.output.replace(/\s+$/, '');
+            if (r.error || r.timeout) bad.push(r.timeout ? t('code_test_timeout').replace('{i}', i + 1) : t('code_test_error').replace('{i}', i + 1).replace('{error}', r.error.trim().split('\n').pop()));
+          });
+          codeNotes.set(q, bad.length ? { cls: 'error', text: bad.join(' ') } : { cls: 'ok', text: t('code_fill_done') });
+          render();
+        } catch (err) {
+          setMsg('error', err.message);
+        } finally { fill.disabled = false; }
+      });
+
+      parts.push(
+        el('label', { class: 'row' }, t('code_lang'), lang),
+        el('label', {}, t('code_starter')), starter,
+        el('label', {}, t('code_reference')), ref,
+        el('label', { style: 'margin-top:16px' }, el('b', {}, t('code_tests'))),
+        el('p', { class: 'muted', style: 'margin:0' }, t('code_tests_hint')),
+        ...tests,
+        el('div', { class: 'row', style: 'margin-top:8px' },
+          el('button', { type: 'button', class: 'secondary small', onclick: () => { q.tests.push({ input: '', output: '' }); render(); } }, t('code_add_test')),
+          fill, msg));
+    }
+
     function render() {
       const box = document.getElementById('questions');
       const kinds = allowedKinds();
@@ -144,6 +212,7 @@
         if (q.kind === 'choice') renderChoice(q, i, parts);
         else if (q.kind === 'truefalse') renderTrueFalse(q, i, parts);
         else if (q.kind === 'order') renderOrder(q, parts);
+        else if (q.kind === 'code') renderCode(q, parts);
         else {
           const ref = el('textarea', { rows: 2, style: 'min-height:60px', placeholder: t('reference_placeholder') });
           ref.value = q.reference || '';
@@ -161,6 +230,10 @@
     async function save() {
       document.getElementById('err').textContent = '';
       exam.title = document.getElementById('title').value;
+      // Пустые строки тестов не сохраняем.
+      exam.questions.forEach((q) => {
+        if (q.kind === 'code' && q.tests) q.tests = q.tests.filter((x) => (x.input || '').trim() || (x.output || '').trim());
+      });
       const saved = await rpc('save_exam', { p_exam_id: id, p_title: exam.title, p_questions: exam.questions });
       exam.questions = saved.questions;
       render();

@@ -285,3 +285,51 @@ reset request.jwt.claim.sub;
 set role anon;
 select pg_temp.expect_error($$ select admin_users() $$, 'unauthorized');
 select pg_temp.check(not is_admin(), 'аноним не администратор');
+
+-- ---------- вопросы с кодом ----------
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (create_exam('Программирование', 'text')->>'id')::bigint as code_id \gset
+select pg_temp.expect_error(format($$ select save_exam(%s, 'П', '[{"kind":"code","text":"x"}]') $$, :code_id), 'invalid_code_lang');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'П', '[{"kind":"code","lang":"cobol","text":"x"}]') $$, :code_id), 'invalid_code_lang');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'П', '[{"kind":"code","lang":"python","text":"x","tests":[{"input":"1"}]}]') $$, :code_id), 'invalid_tests');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'П', '[{"kind":"code","lang":"python","text":"x","tests":"1"}]') $$, :code_id), 'invalid_tests');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Алгебра', '[{"kind":"code","lang":"python","text":"x"}]') $$, :exam_id), 'exam_locked');
+select save_exam(:code_id, 'Программирование', '[
+  {"kind":"code","lang":"python","text":"Сложите два числа","starter":"a, b = map(int, input().split())\n","tests":[{"input":"2 3","output":"5"},{"input":"10 -4","output":"6"}],"points":4},
+  {"kind":"code","lang":"java","text":"Выведите Hello","tests":[],"points":2},
+  {"kind":"text","text":"Что такое цикл?","points":1}]'::jsonb) as cx \gset
+select pg_temp.check((:'cx'::jsonb)->'questions'->0->>'lang' = 'python', 'язык сохранён');
+select pg_temp.check(jsonb_array_length((:'cx'::jsonb)->'questions'->0->'tests') = 2, 'тесты сохранены');
+select pg_temp.check(not ((:'cx'::jsonb)->'questions'->1 ? 'tests'), 'пустой список тестов не хранится');
+select (q->>'id')::bigint as q_py from jsonb_array_elements((:'cx'::jsonb)->'questions') q where q->>'lang' = 'python' \gset
+select (q->>'id')::bigint as q_java from jsonb_array_elements((:'cx'::jsonb)->'questions') q where q->>'lang' = 'java' \gset
+select publish_exam(:code_id)->>'code' as code_code \gset
+
+reset request.jwt.claim.sub;
+set role anon;
+select join_exam(:'code_code', 'Ерлан') as tc \gset
+select get_attempt(:'tc') as ac \gset
+select pg_temp.check((select q->>'starter' from jsonb_array_elements((:'ac'::jsonb)->'questions') q where q->>'lang' = 'python') like 'a, b%', 'ученик видит заготовку');
+select pg_temp.check(not exists (select 1 from jsonb_array_elements((:'ac'::jsonb)->'questions') q where q ? 'tests'), 'тесты скрыты от ученика');
+select submit_attempt(:'tc', jsonb_build_object(:'q_py', 'a, b = map(int, input().split())' || chr(10) || 'print(a + b)', :'q_java', 'class Main {}'));
+
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (p->>'id')::bigint as pid_c from jsonb_array_elements(exam_results(:code_id)->'participants') p \gset
+select pg_temp.check(save_test_grades(:code_id, jsonb_build_array(
+  jsonb_build_object('participantId', :pid_c, 'questionId', :q_py, 'score', 3.9, 'comment', 'Тесты: 2 из 2'))) = 1, 'баллы по тестам сохранены');
+select pg_temp.check((exam_results(:code_id)->'participants'->0->'answers'->(:'q_py')->>'score') = '4', 'балл округлён и ограничен максимумом');
+select pg_temp.check((exam_results(:code_id)->'participants'->0->'answers'->(:'q_py')->>'source') = 'tests', 'источник — тесты');
+select pg_temp.check(save_ai_grades(:code_id, jsonb_build_array(
+  jsonb_build_object('participantId', :pid_c, 'questionId', :q_py, 'score', 1),
+  jsonb_build_object('participantId', :pid_c, 'questionId', :q_java, 'score', 1.5))) = 1, 'ИИ не перезаписывает тесты, но оценивает код без тестов');
+select set_grade(:pid_c, :q_py, 2);
+select pg_temp.check(save_test_grades(:code_id, jsonb_build_array(
+  jsonb_build_object('participantId', :pid_c, 'questionId', :q_py, 'score', 4))) = 0, 'тесты не перезаписывают оценку учителя');
+select pg_temp.check((exam_results(:code_id)->'participants'->0->>'total') = '3.5', 'итог: 2 + 1.5');
+select pg_temp.expect_error(format($$ select save_test_grades(%s, '{}') $$, :code_id), 'invalid_grades');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error(format($$ select save_test_grades(%s, '[]') $$, :code_id), 'not_found');

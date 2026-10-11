@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
-  <script src="teacher-common.js"></script>
+  <script src="teacher-common.js"></script><script src="code-runner.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -26,6 +26,10 @@
         </div>
         <div class="row" style="margin-top:8px"><button id="ai-all" data-i18n="ai_grade_all"></button><span id="ai-msg" class="muted"></span></div>
         <p class="muted" data-i18n="ai_hint"></p>
+      </div>
+      <div id="tests-box" hidden style="margin-top:16px">
+        <div class="row"><button class="secondary" id="tests-all" data-i18n="code_tests_btn"></button><span id="tests-msg" class="muted"></span></div>
+        <p class="muted" data-i18n="code_tests_hint_results"></p>
       </div>
     </div>
     <div class="card" id="analysis-card" hidden>
@@ -137,7 +141,7 @@
     }
 
     function renderStudents() {
-      const hasText = data.questions.some((q) => (q.kind || 'text') === 'text');
+      const hasText = data.questions.some((q) => ['text', 'code'].includes(q.kind || 'text'));
       document.getElementById('students').replaceChildren(...data.participants.map((p) => {
         const items = data.questions.map((q, i) => {
           const a = p.answers[q.id] || {};
@@ -152,6 +156,12 @@
             parts.push(el('p', { style: 'margin-bottom:0' }, `${t('student_order')}: `, mine ? el('span', { class: ok ? 'ok' : 'error' }, ok ? '✓' : '✗') : el('span', { class: 'muted' }, t('no_answer'))));
             if (mine) parts.push(list(mine, ok ? 'ok' : ''));
             if (!ok) parts.push(el('p', { class: 'muted', style: 'margin-bottom:0' }, `${t('correct_order')}:`), list(q.options, 'muted'));
+          } else if (kind === 'code') {
+            parts.push(el('p', { class: 'muted', style: 'margin:4px 0 0' }, el('span', { class: 'badge' }, CodeRunner.langName(q.lang)),
+              q.tests && q.tests.length ? ' · ' + t('code_tests_count').replace('{n}', q.tests.length) : ''));
+            parts.push(a.value ? el('pre', { class: 'code-view' }, a.value) : el('p', { class: 'muted' }, t('no_answer')));
+            if (q.reference) parts.push(el('details', {}, el('summary', { class: 'muted' }, t('code_reference')), el('pre', { class: 'code-view' }, q.reference)));
+            parts.push(gradeForm(p, q, a));
           } else if (kind !== 'text') {
             const chosen = a.value !== undefined && a.value !== null && a.value !== '' ? q.options[Number(a.value)] : null;
             const ok = a.value === String(q.correctIndex);
@@ -171,6 +181,67 @@
           items);
       }));
     }
+
+    // Проверка кода тестами учителя: код каждого ученика запускается здесь, в браузере.
+    const clip = (s, n = 60) => {
+      const one = String(s ?? '').replace(/\s+$/, '').replace(/\n/g, ' ⏎ ');
+      return one.length > n ? one.slice(0, n) + '…' : one;
+    };
+    function testComment(r, tests) {
+      if (r.compileError) return t('code_tests_compile').replace('{error}', clip(r.compileError, 300));
+      const parts = [t('code_tests_summary').replace('{p}', r.passed).replace('{n}', r.total)];
+      const i = r.details.findIndex((d) => !d.ok);
+      if (i >= 0) {
+        const d = r.details[i];
+        if (d.timeout) parts.push(t('code_test_timeout').replace('{i}', i + 1));
+        else if (d.error) parts.push(t('code_test_error').replace('{i}', i + 1).replace('{error}', clip(d.error.trim().split('\n').pop(), 200)));
+        else parts.push(t('code_test_failed').replace('{i}', i + 1).replace('{input}', clip(tests[i].input))
+          .replace('{expected}', clip(tests[i].output)).replace('{got}', clip(d.output)));
+      }
+      return parts.join(' ');
+    }
+
+    let testsRunning = false;
+    async function runTests() {
+      if (testsRunning || aiRunning) return;
+      testsRunning = true;
+      const msg = document.getElementById('tests-msg');
+      const btn = document.getElementById('tests-all');
+      msg.className = 'muted';
+      btn.disabled = true;
+      const qs = data.questions.filter((q) => q.kind === 'code' && q.tests && q.tests.length);
+      const jobs = [];
+      for (const p of data.participants.filter((x) => x.submittedAt)) {
+        for (const q of qs) {
+          const a = p.answers[q.id] || {};
+          if (a.source !== 'teacher') jobs.push({ p, q, a });
+        }
+      }
+      try {
+        for (let i = 0; i < jobs.length; i++) {
+          const { p, q, a } = jobs[i];
+          const progress = t('code_tests_running').replace('{name}', p.name).replace('{i}', i + 1).replace('{n}', jobs.length);
+          msg.textContent = progress;
+          let grade;
+          if (!(a.value || '').trim()) grade = { score: 0, comment: t('no_answer') };
+          else {
+            const r = await CodeRunner.check(q.lang, a.value, q.tests, (k) => { msg.textContent = k === 'code_running' ? progress : t(k); });
+            grade = { score: q.points * r.passed / r.total, comment: testComment(r, q.tests) };
+          }
+          await rpc('save_test_grades', { p_exam_id: id, p_grades: [{ participantId: p.id, questionId: q.id, ...grade }] });
+        }
+        msg.className = 'ok';
+        msg.textContent = t('code_tests_done').replace('{n}', jobs.length);
+      } catch (err) {
+        msg.className = 'error';
+        msg.textContent = err.message;
+      } finally {
+        testsRunning = false;
+        btn.disabled = false;
+        await load().catch(showPageError);
+      }
+    }
+    document.getElementById('tests-all').addEventListener('click', runTests);
 
     // ИИ оценивает студентов по одному, чтобы каждый запрос был коротким.
     let aiRunning = false;
@@ -234,7 +305,9 @@
       renderStudents();
       const meta = data.exam.className ? `${t('class_name')}: ${data.exam.className}` : '';
       document.getElementById('meta-summary').textContent = [meta, data.materials.length ? `${t('exam_materials')}: ${data.materials.length}` : ''].filter(Boolean).join(' · ');
-      document.getElementById('ai-box').hidden = !data.questions.some((q) => q.kind === 'text') || !data.participants.some((p) => p.submittedAt);
+      const anySubmitted = data.participants.some((p) => p.submittedAt);
+      document.getElementById('ai-box').hidden = !data.questions.some((q) => q.kind === 'text' || q.kind === 'code') || !anySubmitted;
+      document.getElementById('tests-box').hidden = !data.questions.some((q) => q.kind === 'code' && q.tests && q.tests.length) || !anySubmitted;
     }
 
     requireLogin().then(load).then(async () => {

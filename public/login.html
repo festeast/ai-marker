@@ -53,12 +53,12 @@
           const { data, error } = await db.auth.signUp({
             email, password, options: { data: { name }, emailRedirectTo: pageUrl('teacher.html') },
           });
-          if (error) throw appError(authErrorCode(error));
+          if (error) throw authError(error);
           // Если в Supabase включено подтверждение email, сессии ещё нет.
           if (!data.session) { err.className = 'ok'; err.textContent = t('check_email'); return; }
         } else {
           const { error } = await db.auth.signInWithPassword({ email, password });
-          if (error) throw appError(authErrorCode(error));
+          if (error) throw authError(error);
         }
         location.href = 'teacher.html';
       } catch (e2) { err.className = 'error'; err.textContent = e2.message; }

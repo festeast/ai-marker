@@ -62,12 +62,24 @@ function authErrorCode(error) {
     weak_password: 'password_too_short',
     validation_failed: 'invalid_email',
     email_address_invalid: 'invalid_email',
+    over_email_send_rate_limit: 'email_rate_limit',
+    over_request_rate_limit: 'too_many_requests',
   };
   if (map[error.code]) return map[error.code];
   if (/invalid login/i.test(error.message)) return 'invalid_credentials';
   if (/already registered/i.test(error.message)) return 'email_taken';
   if (/not confirmed/i.test(error.message)) return 'email_not_confirmed';
+  if (/email rate limit/i.test(error.message)) return 'email_rate_limit';
+  if (/sending confirmation|sending.*email|smtp/i.test(error.message)) return 'email_send_failed';
+  if (/rate limit|too many/i.test(error.message)) return 'too_many_requests';
   return 'server_error';
+}
+
+// Ошибка входа для показа: наш текст, а для непонятных ошибок — ещё и ответ Supabase.
+function authError(error) {
+  const err = appError(authErrorCode(error));
+  if (err.code === 'server_error' && error.message) err.message += ' (' + error.message + ')';
+  return err;
 }
 
 // Отправка события, которая переживает закрытие вкладки.

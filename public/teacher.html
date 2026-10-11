@@ -44,15 +44,25 @@
         el('td', {}, el('span', { class: 'badge ' + x.status }, t('status_' + x.status))),
         el('td', {}, x.code ? el('code', {}, x.code) : '—'),
         el('td', {}, `${t('participants')}: ${x.participantCount}`),
-        el('td', {}, x.status === 'draft'
-          ? el('a', { href: 'edit.html?id=' + x.id }, t('open'))
-          : el('span', { class: 'row' },
-              el('a', { href: 'monitor.html?id=' + x.id }, t('monitor')),
-              el('a', { href: 'results.html?id=' + x.id }, t('results')))),
+        el('td', {}, el('span', { class: 'row' },
+          ...(x.status === 'draft'
+            ? [el('a', { href: 'edit.html?id=' + x.id }, t('open'))]
+            : [el('a', { href: 'monitor.html?id=' + x.id }, t('monitor')), el('a', { href: 'results.html?id=' + x.id }, t('results'))]),
+          el('button', { type: 'button', class: 'secondary small', title: t('copy_exam_hint'), onclick: () => copyExam(x) }, t('copy_exam')))),
       ));
       list.append(el('div', { class: 'table-scroll' }, el('table', {}, el('tbody', {}, rows))));
     }
-    document.getElementById('new-exam').addEventListener('submit', async (e) => {
+    // Копия экзамена открывается в редакторе как новый черновик.
+    async function copyExam(x) {
+      const suggested = `${x.title} ${t('copy_suffix')}`;
+      const title = prompt(t('copy_exam_q'), suggested);
+      if (title === null) return;
+      try {
+        const exam = await rpc('copy_exam', { p_exam_id: x.id, p_title: title.trim() || suggested });
+        location.href = 'edit.html?id=' + exam.id;
+      } catch (err) { document.getElementById('err').textContent = err.message; }
+    }
+        document.getElementById('new-exam').addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
         const exam = await rpc('create_exam', {

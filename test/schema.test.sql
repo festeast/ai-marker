@@ -333,3 +333,23 @@ select pg_temp.check((exam_results(:code_id)->'participants'->0->>'total') = '3.
 select pg_temp.expect_error(format($$ select save_test_grades(%s, '{}') $$, :code_id), 'invalid_grades');
 set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
 select pg_temp.expect_error(format($$ select save_test_grades(%s, '[]') $$, :code_id), 'not_found');
+
+-- ---------- копия экзамена ----------
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.expect_error(format($$ select copy_exam(%s, ' ') $$, :code_id), 'title_required');
+select copy_exam(:code_id, 'Программирование (копия)') as cp \gset
+select pg_temp.check((:'cp'::jsonb)->>'status' = 'draft' and (:'cp'::jsonb)->>'code' is null, 'копия — черновик без кода');
+select get_exam(((:'cp'::jsonb)->>'id')::bigint) as cpe \gset
+select get_exam(:code_id) as orig \gset
+select pg_temp.check((select jsonb_agg(q - 'id') from jsonb_array_elements((:'cpe'::jsonb)->'questions') q)
+  = (select jsonb_agg(q - 'id') from jsonb_array_elements((:'orig'::jsonb)->'questions') q), 'вопросы скопированы вместе с тестами');
+select pg_temp.check(exam_results(((:'cp'::jsonb)->>'id')::bigint)->'participants' = '[]'::jsonb, 'ответы учеников не копируются');
+select (save_material(null, 'Циклы', 'Информатика', 'for, while')->>'id')::bigint as mat2 \gset
+select update_exam_meta(:chem_id, '9Б', array[:mat2]::bigint[]);
+select (copy_exam(:chem_id, 'Химия 2')->>'id')::bigint as chem2 \gset
+select pg_temp.check(get_exam(:chem2)->'materialIds' = jsonb_build_array(:mat2), 'материалы скопированы');
+select pg_temp.check(get_exam(:chem2)->>'className' is not distinct from get_exam(:chem_id)->>'className', 'класс скопирован');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error(format($$ select copy_exam(%s, 'Чужой') $$, :code_id), 'not_found');

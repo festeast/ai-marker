@@ -421,6 +421,24 @@ begin
   return _exam_json(e);
 end $$;
 
+-- Копия экзамена — новый черновик с теми же вопросами, классом, перемешиванием и материалами.
+-- Ответы учеников и оценки не копируются. Копировать можно экзамен в любом статусе.
+create or replace function public.copy_exam(p_exam_id bigint, p_title text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  e exams := _own_exam(p_exam_id);
+  c exams;
+begin
+  if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
+  insert into exams (teacher_id, title, type, class_name, shuffle)
+  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle) returning * into c;
+  insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
+  select c.id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests
+  from questions where exam_id = e.id order by position;
+  insert into exam_materials (exam_id, material_id) select c.id, material_id from exam_materials where exam_id = e.id;
+  return _exam_json(c);
+end $$;
+
 create or replace function public.delete_exam(p_exam_id bigint) returns void
 language plpgsql security definer set search_path = public as $$
 declare e exams := _own_exam(p_exam_id);

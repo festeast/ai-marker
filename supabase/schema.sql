@@ -38,14 +38,21 @@ alter table public.questions add column if not exists reference text;
 --   choice    — один верный вариант из нескольких (correct_index);
 --   truefalse — «Верно / Неверно» (options из двух подписей, correct_index 0 или 1);
 --   order     — расставить по порядку (options в верном порядке, ответ — индексы через запятую);
---   text      — открытый ответ, оценивает учитель или ИИ.
+--   text      — открытый ответ, оценивает учитель или ИИ;
+--   code      — программа на Python или Java (code_lang): запускается в браузере,
+--               оценивают тесты учителя (tests), ИИ или сам учитель.
 alter table public.questions add column if not exists kind text;
 update public.questions q set kind = case when e.type = 'text' then 'text' else 'choice' end
   from public.exams e where e.id = q.exam_id and q.kind is null;
 alter table public.questions alter column kind set default 'choice';
 alter table public.questions alter column kind set not null;
 alter table public.questions drop constraint if exists questions_kind_check;
-alter table public.questions add constraint questions_kind_check check (kind in ('choice', 'truefalse', 'order', 'text'));
+alter table public.questions add constraint questions_kind_check check (kind in ('choice', 'truefalse', 'order', 'text', 'code'));
+-- Добавлено позже: вопросы с кодом. code_lang — python | java; starter — заготовка кода для ученика;
+-- tests — [{ "input": "...", "output": "..." }]: что подать на вход и что программа должна вывести (ученик их не видит).
+alter table public.questions add column if not exists code_lang text;
+alter table public.questions add column if not exists starter text;
+alter table public.questions add column if not exists tests jsonb;
 
 create table if not exists public.participants (
   id bigint generated always as identity primary key,
@@ -65,7 +72,7 @@ create table if not exists public.answers (
   primary key (participant_id, question_id)
 );
 
--- Оценка текстового ответа. source: teacher (поставил учитель) | ai (предложил ИИ).
+-- Оценка текстового ответа или кода. source: teacher (поставил учитель) | ai (предложил ИИ) | tests (тесты учителя).
 create table if not exists public.grades (
   participant_id bigint not null references public.participants(id) on delete cascade,
   question_id bigint not null references public.questions(id) on delete cascade,
@@ -75,6 +82,8 @@ create table if not exists public.grades (
   updated_at timestamptz not null default now(),
   primary key (participant_id, question_id)
 );
+alter table public.grades drop constraint if exists grades_source_check;
+alter table public.grades add constraint grades_source_check check (source in ('teacher', 'ai', 'tests'));
 
 -- type: join | leave | return | paste | submit
 create table if not exists public.events (
@@ -148,7 +157,9 @@ language sql stable as $$
     jsonb_strip_nulls(jsonb_build_object(
       'id', q.id, 'kind', q.kind, 'text', q.text, 'options', q.options, 'points', q.points,
       'correctIndex', case when p_with_answers then q.correct_index end,
-      'reference', case when p_with_answers then q.reference end))
+      'reference', case when p_with_answers then q.reference end,
+      'lang', q.code_lang, 'starter', q.starter,
+      'tests', case when p_with_answers then q.tests end))
     order by q.position), '[]'::jsonb)
   from public.questions q where q.exam_id = p_exam_id
 $$;
@@ -158,6 +169,7 @@ create or replace function public._is_correct(q public.questions, v text) return
 language sql immutable as $$
   select case q.kind
     when 'text' then null
+    when 'code' then null
     when 'order' then v = (select string_agg(i::text, ',' order by i) from generate_series(0, jsonb_array_length(q.options) - 1) i)
     else v = q.correct_index::text end
 $$;
@@ -165,7 +177,7 @@ $$;
 -- Балл за вопрос: автопроверка или оценка учителя / ИИ (g) для открытого вопроса.
 create or replace function public._q_score(q public.questions, v text, g numeric) returns numeric
 language sql immutable as $$
-  select case when q.kind = 'text' then g when _is_correct(q, v) then q.points else 0 end
+  select case when q.kind in ('text', 'code') then g when _is_correct(q, v) then q.points else 0 end
 $$;
 
 -- Вопросы для ученика: без верных ответов. Варианты приходят как {i, text}, где i — номер
@@ -182,8 +194,9 @@ declare
 begin
   for q in select * from questions where exam_id = e.id
            order by case when e.shuffle then md5(p_seed || ':q' || id) end, position loop
-    if q.kind = 'text' or q.options is null then
-      res := res || jsonb_build_array(jsonb_build_object('id', q.id, 'kind', q.kind, 'text', q.text, 'points', q.points));
+    if q.kind in ('text', 'code') or q.options is null then
+      res := res || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('id', q.id, 'kind', q.kind, 'text', q.text, 'points', q.points,
+        'lang', q.code_lang, 'starter', q.starter)));
       continue;
     end if;
     n := jsonb_array_length(q.options);
@@ -304,6 +317,8 @@ end $$;
 -- Сохраняет название и весь список вопросов черновика целиком.
 -- p_questions: [{ "kind": "choice", "text": "...", "options": ["a","b"], "correctIndex": 0, "points": 1, "reference": "..." }, ...]
 -- kind по умолчанию: choice в тесте, text в экзамене с открытыми вопросами.
+-- Вопрос с кодом: { "kind": "code", "lang": "python", "starter": "...", "tests": [{"input": "2 3", "output": "5"}], ... }
+-- (только в экзаменах с открытыми вопросами и смешанных).
 create or replace function public.save_exam(p_exam_id bigint, p_title text, p_questions jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
@@ -325,11 +340,22 @@ begin
       raise exception 'invalid_points';
     end if;
     k := coalesce(q->>'kind', case when e.type = 'text' then 'text' else 'choice' end);
-    if k not in ('choice', 'truefalse', 'order', 'text')
-       or (e.type = 'quiz' and k = 'text') or (e.type = 'text' and k <> 'text') then
+    if k not in ('choice', 'truefalse', 'order', 'text', 'code')
+       or (e.type = 'quiz' and k in ('text', 'code')) or (e.type = 'text' and k not in ('text', 'code')) then
       raise exception 'invalid_kind';
     end if;
-    if k <> 'text' then
+    if k = 'code' then
+      if coalesce(q->>'lang', '') not in ('python', 'java') then raise exception 'invalid_code_lang'; end if;
+      if q ? 'tests' and jsonb_typeof(q->'tests') <> 'null' and (jsonb_typeof(q->'tests') <> 'array'
+         or jsonb_array_length(q->'tests') > 30
+         or exists (select 1 from jsonb_array_elements(q->'tests') x
+                    where jsonb_typeof(x) <> 'object' or jsonb_typeof(x->'output') is distinct from 'string'
+                       or (x ? 'input' and jsonb_typeof(x->'input') <> 'string')
+                       or length(x->>'input') > 10000 or length(x->>'output') > 10000)) then
+        raise exception 'invalid_tests';
+      end if;
+    end if;
+    if k not in ('text', 'code') then
       opts := q->'options';
       if opts is null or jsonb_typeof(opts) <> 'array' or jsonb_array_length(opts) < 2
          or (k = 'truefalse' and jsonb_array_length(opts) <> 2)
@@ -350,13 +376,18 @@ begin
   delete from questions where exam_id = e.id;
   for q in select value from jsonb_array_elements(p_questions) loop
     k := coalesce(q->>'kind', case when e.type = 'text' then 'text' else 'choice' end);
-    insert into questions (exam_id, position, kind, text, options, correct_index, points, reference)
+    insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
     values (
       e.id, idx, k, trim(q->>'text'),
-      case when k <> 'text' then (select jsonb_agg(trim(o) order by n) from jsonb_array_elements_text(q->'options') with ordinality t(o, n)) end,
+      case when k not in ('text', 'code') then (select jsonb_agg(trim(o) order by n) from jsonb_array_elements_text(q->'options') with ordinality t(o, n)) end,
       case when k in ('choice', 'truefalse') then (q->>'correctIndex')::int end,
       coalesce((q->>'points')::int, 1),
-      nullif(left(trim(coalesce(q->>'reference', '')), 5000), ''));
+      nullif(left(trim(coalesce(q->>'reference', '')), 5000), ''),
+      case when k = 'code' then q->>'lang' end,
+      case when k = 'code' then nullif(left(coalesce(q->>'starter', ''), 20000), '') end,
+      case when k = 'code' and jsonb_typeof(q->'tests') = 'array' and jsonb_array_length(q->'tests') > 0 then
+        (select jsonb_agg(jsonb_build_object('input', coalesce(x->>'input', ''), 'output', x->>'output') order by n)
+         from jsonb_array_elements(q->'tests') with ordinality t(x, n)) end);
     idx := idx + 1;
   end loop;
   return get_exam(e.id);
@@ -431,7 +462,7 @@ begin
           'score', case when e.type <> 'text' and p.submitted_at is not null then jsonb_build_object(
             'correct', (select count(*) from questions q join answers a on a.question_id = q.id and a.participant_id = p.id
                         where q.exam_id = e.id and _is_correct(q, a.value)),
-            'total', (select count(*) from questions q where q.exam_id = e.id and q.kind <> 'text')) end
+            'total', (select count(*) from questions q where q.exam_id = e.id and q.kind not in ('text', 'code'))) end
         )) as row
         from participants p where p.exam_id = e.id
       ) s), '[]'::jsonb),
@@ -470,7 +501,7 @@ begin
               'value', a.value,
               'score', _q_score(q, a.value, g.score),
               'comment', g.comment,
-              'source', case when q.kind <> 'text' then 'auto' else g.source end)))
+              'source', case when q.kind not in ('text', 'code') then 'auto' else g.source end)))
             from questions q
             left join answers a on a.question_id = q.id and a.participant_id = p.id
             left join grades g on g.question_id = q.id and g.participant_id = p.id
@@ -483,7 +514,7 @@ begin
             where q.exam_id = e.id),
           'gradedCount', (select count(*) from questions q
                           left join grades g on g.question_id = q.id and g.participant_id = p.id
-                          where q.exam_id = e.id and (q.kind <> 'text' or g.score is not null))
+                          where q.exam_id = e.id and (q.kind not in ('text', 'code') or g.score is not null))
         ) as row
         from participants p where p.exam_id = e.id
       ) r), '[]'::jsonb));
@@ -503,7 +534,7 @@ begin
   e := _own_exam(p.exam_id);
   select * into q from questions where id = p_question_id and exam_id = e.id;
   if not found then raise exception 'not_found'; end if;
-  if q.kind <> 'text' then raise exception 'not_gradable'; end if;
+  if q.kind not in ('text', 'code') then raise exception 'not_gradable'; end if;
   if p_score is null or p_score < 0 or p_score > q.points then raise exception 'invalid_score'; end if;
   insert into grades (participant_id, question_id, score, comment, source, updated_at)
   values (p.id, q.id, p_score, nullif(left(trim(coalesce(p_comment, '')), 5000), ''), 'teacher', now())
@@ -512,7 +543,7 @@ begin
 end $$;
 
 -- Сохраняет оценки ИИ (вызывается из функции supabase/functions/grade).
--- Оценки, которые учитель поставил сам, ИИ не перезаписывает.
+-- Оценки, которые учитель поставил сам или посчитали тесты, ИИ не перезаписывает.
 -- p_grades: [{ "participantId": 1, "questionId": 2, "score": 3.5, "comment": "..." }, ...]
 create or replace function public.save_ai_grades(p_exam_id bigint, p_grades jsonb) returns int
 language plpgsql security definer set search_path = public as $$
@@ -529,11 +560,37 @@ begin
          'ai', now()
   from jsonb_array_elements(p_grades) g
   join participants p on p.id = (g->>'participantId')::bigint and p.exam_id = e.id
-  join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind = 'text'
+  join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind in ('text', 'code')
   where jsonb_typeof(g->'score') = 'number'
   on conflict (participant_id, question_id) do update
     set score = excluded.score, comment = excluded.comment, source = 'ai', updated_at = now()
     where grades.source = 'ai';
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- Сохраняет баллы за код по тестам учителя. Тесты запускаются в браузере учителя
+-- на странице «Ответы и оценки»; оценку, поставленную учителем вручную, они не трогают.
+-- p_grades: [{ "participantId": 1, "questionId": 2, "score": 1.5, "comment": "Тесты: 3 из 4" }, ...]
+create or replace function public.save_test_grades(p_exam_id bigint, p_grades jsonb) returns int
+language plpgsql security definer set search_path = public as $$
+declare
+  e exams := _own_exam(p_exam_id);
+  n int;
+begin
+  if p_grades is null or jsonb_typeof(p_grades) <> 'array' then raise exception 'invalid_grades'; end if;
+  insert into grades (participant_id, question_id, score, comment, source, updated_at)
+  select p.id, q.id,
+         trim_scale(greatest(0, least(q.points, round((g->>'score')::numeric * 2) / 2))),
+         nullif(left(trim(coalesce(g->>'comment', '')), 5000), ''),
+         'tests', now()
+  from jsonb_array_elements(p_grades) g
+  join participants p on p.id = (g->>'participantId')::bigint and p.exam_id = e.id
+  join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind = 'code'
+  where jsonb_typeof(g->'score') = 'number'
+  on conflict (participant_id, question_id) do update
+    set score = excluded.score, comment = excluded.comment, source = 'tests', updated_at = now()
+    where grades.source in ('ai', 'tests');
   get diagnostics n = row_count;
   return n;
 end $$;
@@ -646,7 +703,7 @@ returns table (participant_id bigint, name text, submitted boolean, total numeri
 language sql stable security definer set search_path = public as $$
   select p.id, p.name, p.submitted_at is not null,
     coalesce(sum(_q_score(q, a.value, g.score)), 0),
-    count(q.id) filter (where q.kind <> 'text' or g.score is not null)
+    count(q.id) filter (where q.kind not in ('text', 'code') or g.score is not null)
   from participants p
   left join questions q on q.exam_id = p.exam_id
   left join answers a on a.question_id = q.id and a.participant_id = p.id

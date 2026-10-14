@@ -647,6 +647,18 @@ begin
   return jsonb_build_object('text', v, 'source', p_source, 'updatedAt', now());
 end $$;
 
+-- Учитель удаляет ученика из своего экзамена вместе с его ответами, оценками,
+-- отзывом и событиями (они удаляются каскадом). Других учеников это не касается.
+create or replace function public.delete_participant(p_participant_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare p participants;
+begin
+  select * into p from participants where id = p_participant_id;
+  if not found then raise exception 'not_found'; end if;
+  perform _own_exam(p.exam_id);
+  delete from participants where id = p.id;
+end $$;
+
 -- ---------- Студент (без аккаунта: код + имя) ----------
 
 create or replace function public.exam_by_code(p_code text) returns jsonb

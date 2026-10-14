@@ -85,6 +85,15 @@ create table if not exists public.grades (
 alter table public.grades drop constraint if exists grades_source_check;
 alter table public.grades add constraint grades_source_check check (source in ('teacher', 'ai', 'tests'));
 
+-- Отзыв ученику по всему экзамену: сильные стороны, ошибки, что повторить.
+-- source: ai (составил ИИ) | teacher (написал или исправил учитель).
+create table if not exists public.feedback (
+  participant_id bigint primary key references public.participants(id) on delete cascade,
+  text text not null,
+  source text not null check (source in ('teacher', 'ai')),
+  updated_at timestamptz not null default now()
+);
+
 -- type: join | leave | return | paste | submit
 create table if not exists public.events (
   id bigint generated always as identity primary key,
@@ -131,6 +140,7 @@ alter table public.events enable row level security;
 alter table public.grades enable row level security;
 alter table public.materials enable row level security;
 alter table public.exam_materials enable row level security;
+alter table public.feedback enable row level security;
 
 -- ---------- Настройки ----------
 
@@ -514,6 +524,8 @@ begin
           'name', p.name,
           'joinedAt', p.joined_at,
           'submittedAt', p.submitted_at,
+          'feedback', (select jsonb_build_object('text', f.text, 'source', f.source, 'updatedAt', f.updated_at)
+                       from feedback f where f.participant_id = p.id),
           'answers', coalesce((
             select jsonb_object_agg(q.id::text, jsonb_strip_nulls(jsonb_build_object(
               'value', a.value,
@@ -611,6 +623,28 @@ begin
     where grades.source in ('ai', 'tests');
   get diagnostics n = row_count;
   return n;
+end $$;
+
+-- Сохраняет отзыв ученику. p_source: teacher (учитель на странице результатов)
+-- или ai (функция supabase/functions/grade). Пустой текст удаляет отзыв.
+create or replace function public.save_feedback(p_participant_id bigint, p_text text, p_source text default 'teacher')
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  p participants;
+  v text := left(trim(coalesce(p_text, '')), 10000);
+begin
+  if p_source not in ('teacher', 'ai') then raise exception 'invalid_request'; end if;
+  select * into p from participants where id = p_participant_id;
+  if not found then raise exception 'not_found'; end if;
+  perform _own_exam(p.exam_id);
+  if v = '' then
+    delete from feedback where participant_id = p.id;
+    return null;
+  end if;
+  insert into feedback (participant_id, text, source, updated_at) values (p.id, v, p_source, now())
+  on conflict (participant_id) do update set text = excluded.text, source = excluded.source, updated_at = now();
+  return jsonb_build_object('text', v, 'source', p_source, 'updatedAt', now());
 end $$;
 
 -- ---------- Студент (без аккаунта: код + имя) ----------

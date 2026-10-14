@@ -160,3 +160,11 @@ pre.code-output .note { color: #f6c86b; }
   #print-area .sheet:last-child { break-after: auto; }
   #print-area h2 { margin: 0 0 4px; }
 }
+
+/* Карточка ученика на странице результатов: свёрнута, в заголовке имя и баллы. */
+details.student > summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; list-style: none; }
+details.student > summary::-webkit-details-marker { display: none; }
+details.student > summary h2 { margin: 0; font-size: 18px; }
+details.student > summary h2::before { content: '▸'; display: inline-block; width: 1em; color: var(--muted, #888); }
+details.student[open] > summary h2::before { transform: rotate(90deg); }
+details.student[open] > summary { margin-bottom: 8px; }

@@ -48,6 +48,10 @@
       <summary><b data-i18n="class_and_materials"></b> <span class="muted" id="meta-summary"></span></summary>
       <div id="meta"></div>
     </details>
+    <div class="row" id="students-tools" hidden style="margin-bottom:8px">
+      <button class="secondary small" id="expand-all" data-i18n="expand_all"></button>
+      <button class="secondary small" id="collapse-all" data-i18n="collapse_all"></button>
+    </div>
     <div id="students"></div>
     <div class="error" id="err"></div>
   </main>
@@ -183,13 +187,40 @@
           }
           return el('div', { class: 'question' }, parts);
         });
-        const aiOne = hasText && p.submittedAt ? el('button', { class: 'secondary small', onclick: (e) => gradeWithAi([p], e.target) }, t('ai_grade_one')) : null;
-        return el('div', { class: 'card', id: 'p' + p.id },
-          el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, p.name),
-            el('span', { class: 'row' }, aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
+        // Кнопка в заголовке не должна сворачивать и разворачивать карточку.
+        const aiOne = hasText && p.submittedAt ? el('button', { class: 'secondary small', onclick: (e) => { e.preventDefault(); gradeWithAi([p], e.target); } }, t('ai_grade_one')) : null;
+        const card = el('details', { class: 'card student', id: 'p' + p.id },
+          el('summary', {},
+            el('h2', {}, p.name),
+            el('span', { class: 'row' },
+              p.submittedAt ? null : el('span', { class: 'muted' }, t('not_submitted')),
+              el('span', { class: 'muted' }, `${t('graded')}: ${p.gradedCount} / ${data.questions.length}`),
+              aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
           items, p.submittedAt ? feedbackForm(p) : null);
+        card.open = openCards.has(p.id);
+        card.addEventListener('toggle', () => { if (card.open) openCards.add(p.id); else openCards.delete(p.id); });
+        return card;
       }));
+      document.getElementById('students-tools').hidden = !data.participants.length;
     }
+
+    // Карточки учеников свёрнуты; какие раскрыты — помним, пока открыта страница.
+    const openCards = new Set();
+    function openCard(pid) {
+      const card = document.getElementById('p' + pid);
+      if (card) { card.open = true; card.scrollIntoView({ block: 'start' }); }
+    }
+    // Ссылка на ученика (из таблицы или анализа класса) раскрывает его карточку.
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest('a[href^="#p"]');
+      if (!a) return;
+      e.preventDefault();
+      openCard(a.getAttribute('href').slice(2));
+      history.replaceState(null, '', a.getAttribute('href'));
+    });
+    const setAll = (open) => document.querySelectorAll('#students details.student').forEach((d) => { d.open = open; });
+    document.getElementById('expand-all').addEventListener('click', () => setAll(true));
+    document.getElementById('collapse-all').addEventListener('click', () => setAll(false));
 
     // ---------- Отзыв ученику: составляет ИИ, учитель правит, копирует или печатает ----------
     const fbForms = new Map();
@@ -441,6 +472,7 @@
     }
 
     requireLogin().then(load).then(async () => {
+      if (/^#p\d+$/.test(location.hash)) openCard(location.hash.slice(2));
       const exam = await rpc('get_exam', { p_exam_id: id });
       await renderExamMeta(document.getElementById('meta'), exam);
     }).catch(showPageError);

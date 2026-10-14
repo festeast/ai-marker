@@ -48,9 +48,22 @@
           ...(x.status === 'draft'
             ? [el('a', { href: 'edit.html?id=' + x.id }, t('open'))]
             : [el('a', { href: 'monitor.html?id=' + x.id }, t('monitor')), el('a', { href: 'results.html?id=' + x.id }, t('results'))]),
-          el('button', { type: 'button', class: 'secondary small', title: t('copy_exam_hint'), onclick: () => copyExam(x) }, t('copy_exam')))),
+          el('button', { type: 'button', class: 'secondary small', title: t('copy_exam_hint'), onclick: () => copyExam(x) }, t('copy_exam')),
+          el('button', { type: 'button', class: 'danger small', onclick: () => deleteExam(x) }, t('remove')))),
       ));
       list.append(el('div', { class: 'table-scroll' }, el('table', {}, el('tbody', {}, rows))));
+    }
+    // Удаление экзамена со всеми ответами. Если ученики уже писали, просим ввести название.
+    async function deleteExam(x) {
+      if (x.participantCount > 0) {
+        const typed = prompt(t('delete_exam_typed').replace('{n}', x.participantCount).replace('{title}', x.title));
+        if (typed === null) return;
+        if (typed.trim() !== x.title.trim()) { alert(t('delete_exam_mismatch')); return; }
+      } else if (!confirm(t('delete_exam_q'))) return;
+      try {
+        await rpc('delete_exam', { p_exam_id: x.id });
+        await load();
+      } catch (err) { document.getElementById('err').textContent = err.message; }
     }
     // Копия экзамена открывается в редакторе как новый черновик.
     async function copyExam(x) {

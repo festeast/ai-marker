@@ -148,3 +148,15 @@ pre.code-output .note { color: #f6c86b; }
 .test-row .num { padding-top: 10px; color: var(--muted); }
 .test-row label { margin: 0 0 2px; }
 @media (max-width: 600px) { .test-row { grid-template-columns: 1fr; } .test-row .num { padding: 0; } }
+
+/* Отзывы ученикам: на экране область печати скрыта, при печати видна только она. */
+#print-area { display: none; }
+.sheet-text { white-space: pre-wrap; line-height: 1.5; }
+@media print {
+  body.printing > *:not(#print-area) { display: none !important; }
+  body.printing #print-area { display: block; }
+  body.printing { background: #fff; }
+  #print-area .sheet { break-after: page; padding: 0; }
+  #print-area .sheet:last-child { break-after: auto; }
+  #print-area h2 { margin: 0 0 4px; }
+}

@@ -24,8 +24,16 @@
             </select>
           </label>
         </div>
-        <div class="row" style="margin-top:8px"><button id="ai-all" data-i18n="ai_grade_all"></button><span id="ai-msg" class="muted"></span></div>
-        <p class="muted" data-i18n="ai_hint"></p>
+        <div id="ai-grade-box">
+          <div class="row" style="margin-top:8px"><button id="ai-all" data-i18n="ai_grade_all"></button><span id="ai-msg" class="muted"></span></div>
+          <p class="muted" data-i18n="ai_hint"></p>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="secondary" id="fb-all" data-i18n="fb_all"></button>
+          <button class="secondary" id="fb-print-all" data-i18n="fb_print_all"></button>
+          <span id="fb-msg" class="muted"></span>
+        </div>
+        <p class="muted" data-i18n="fb_hint"></p>
       </div>
       <div id="tests-box" hidden style="margin-top:16px">
         <div class="row"><button class="secondary" id="tests-all" data-i18n="code_tests_btn"></button><span id="tests-msg" class="muted"></span></div>
@@ -43,6 +51,7 @@
     <div id="students"></div>
     <div class="error" id="err"></div>
   </main>
+  <div id="print-area"></div>
   <script>
     const id = Number(new URLSearchParams(location.search).get('id'));
     document.getElementById('monitor-link').href = 'monitor.html?id=' + id;
@@ -178,9 +187,120 @@
         return el('div', { class: 'card', id: 'p' + p.id },
           el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, p.name),
             el('span', { class: 'row' }, aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
-          items);
+          items, p.submittedAt ? feedbackForm(p) : null);
       }));
     }
+
+    // ---------- Отзыв ученику: составляет ИИ, учитель правит, копирует или печатает ----------
+    const fbForms = new Map();
+
+    function feedbackLabel(f) {
+      return f ? t(f.source === 'ai' ? 'fb_by_ai' : 'fb_by_teacher') : '';
+    }
+
+    // Отзыв с шапкой: имя, экзамен, баллы — для копирования и печати.
+    function feedbackSheet(p, text) {
+      const score = t('fb_score_line').replace('{score}', fmtScore(p.total)).replace('{max}', data.maxScore);
+      return { head: `${p.name} — ${data.exam.title}`, score, text };
+    }
+
+    function feedbackForm(p) {
+      const box = el('textarea', { rows: 9, placeholder: t('fb_placeholder') });
+      box.value = p.feedback ? p.feedback.text : '';
+      const msg = el('span', { class: 'muted' }, feedbackLabel(p.feedback));
+      const setMsg = (cls, text) => { msg.className = cls; msg.textContent = text; };
+      const dirty = () => box.value.trim() !== (p.feedback ? p.feedback.text : '');
+      box.addEventListener('input', () => setMsg('muted', dirty() ? t('fb_unsaved') : feedbackLabel(p.feedback)));
+      const save = el('button', { class: 'small', onclick: async () => {
+        try {
+          p.feedback = await rpc('save_feedback', { p_participant_id: p.id, p_text: box.value });
+          box.value = p.feedback ? p.feedback.text : '';
+          setMsg('ok', p.feedback ? t('fb_by_teacher') : '');
+        } catch (err) { setMsg('error', err.message); }
+      } }, t('save'));
+      const ai = el('button', { class: 'secondary small', onclick: () => {
+        if (box.value.trim() && (dirty() || (p.feedback && p.feedback.source === 'teacher')) && !confirm(t('fb_confirm_replace'))) return;
+        feedbackWithAi([p], true);
+      } }, t(p.feedback ? 'fb_regen' : 'fb_ai_one'));
+      const copy = el('button', { class: 'secondary small', onclick: async () => {
+        const s = feedbackSheet(p, box.value.trim());
+        try {
+          await navigator.clipboard.writeText(`${s.head}\n${s.score}\n\n${s.text}`);
+          setMsg('ok', t('fb_copied'));
+        } catch {
+          box.select();
+          setMsg('error', t('fb_copy_failed'));
+        }
+      } }, t('fb_copy'));
+      const print = el('button', { class: 'secondary small', onclick: () => printSheets([feedbackSheet(p, box.value.trim())]) }, t('fb_print'));
+      fbForms.set(p.id, { box, setMsg, ai, p });
+      return el('div', { class: 'question feedback' },
+        el('h3', { style: 'margin:0 0 8px' }, t('fb_title')), box,
+        el('div', { class: 'row', style: 'margin-top:8px' }, ai, save, copy, print, msg));
+    }
+
+    // Печать: каждый отзыв на отдельном листе.
+    function printSheets(sheets) {
+      sheets = sheets.filter((s) => s.text);
+      if (!sheets.length) { alert(t('fb_none')); return; }
+      const area = document.getElementById('print-area');
+      area.replaceChildren(...sheets.map((s) => el('div', { class: 'sheet' },
+        el('h2', {}, s.head), el('p', { class: 'muted' }, s.score), el('div', { class: 'sheet-text' }, s.text))));
+      document.body.classList.add('printing');
+      window.print();
+      document.body.classList.remove('printing');
+    }
+
+    document.getElementById('fb-print-all').addEventListener('click', () => {
+      printSheets(data.participants.filter((p) => fbForms.has(p.id)).map((p) => feedbackSheet(p, fbForms.get(p.id).box.value.trim())));
+    });
+
+    // Отзывы пишем по одному ученику; страницу не перерисовываем, чтобы не потерять несохранённые правки.
+    async function feedbackWithAi(students, single) {
+      if (aiRunning || testsRunning) return;
+      aiRunning = true;
+      const msg = document.getElementById('fb-msg');
+      msg.className = 'muted';
+      const buttons = document.querySelectorAll('#ai-all, #fb-all, #ai-quality, #students button');
+      buttons.forEach((b) => { b.disabled = true; });
+      let done = 0;
+      try {
+        for (let i = 0; i < students.length; i++) {
+          const p = students[i];
+          const form = fbForms.get(p.id);
+          const progress = `${t('fb_generating')}: ${p.name} (${i + 1} / ${students.length})…`;
+          msg.textContent = progress;
+          if (form) form.setMsg('muted', t('fb_generating') + '…');
+          const r = await callFunction('grade', { action: 'feedback', examId: id, participantId: p.id, quality: quality.value, lang: LANG });
+          if (!r || !r.feedback) throw appError('invalid_request');
+          p.feedback = r.feedback;
+          if (form) {
+            form.box.value = r.feedback.text;
+            form.setMsg('muted', t('fb_by_ai'));
+            form.ai.textContent = t('fb_regen');
+          }
+          done++;
+        }
+        msg.className = 'ok';
+        msg.textContent = single ? '' : t('fb_done').replace('{n}', done);
+      } catch (err) {
+        msg.className = 'error';
+        msg.textContent = err.message;
+        const form = fbForms.get(students[done] && students[done].id);
+        if (form) form.setMsg('error', err.message);
+      } finally {
+        aiRunning = false;
+        buttons.forEach((b) => { b.disabled = false; });
+        refreshAiUsage();
+      }
+    }
+
+    document.getElementById('fb-all').addEventListener('click', () => {
+      // Готовые отзывы (ИИ или учителя) не перезаписываем.
+      const todo = data.participants.filter((p) => p.submittedAt && !p.feedback);
+      if (!todo.length) { const m = document.getElementById('fb-msg'); m.className = 'muted'; m.textContent = t('fb_all_ready'); return; }
+      feedbackWithAi(todo, false);
+    });
 
     // Проверка кода тестами учителя: код каждого ученика запускается здесь, в браузере.
     const clip = (s, n = 60) => {
@@ -250,7 +370,7 @@
       aiRunning = true;
       const msg = document.getElementById('ai-msg');
       msg.className = 'muted';
-      document.querySelectorAll('#ai-all, #ai-quality, #students button').forEach((b) => { b.disabled = true; });
+      document.querySelectorAll('#ai-all, #fb-all, #ai-quality, #students button').forEach((b) => { b.disabled = true; });
       try {
         for (let i = 0; i < students.length; i++) {
           msg.textContent = `${t('ai_grading')}: ${students[i].name} (${i + 1} / ${students.length})…`;
@@ -266,6 +386,7 @@
         await load().catch(showPageError);
         refreshAiUsage();
         document.getElementById('ai-all').disabled = false;
+        document.getElementById('fb-all').disabled = false;
         quality.disabled = false;
         if (button) document.getElementById('ai-box').scrollIntoView({ block: 'nearest' });
       }
@@ -302,11 +423,20 @@
       document.title = data.exam.title + ' — ' + t('results');
       renderSummary();
       renderAnalysis();
+      // Несохранённые правки отзывов переживают перерисовку.
+      const drafts = new Map([...fbForms].filter(([, f]) => f.box.value.trim() !== (f.p.feedback ? f.p.feedback.text : ''))
+        .map(([pid, f]) => [pid, f.box.value]));
+      fbForms.clear();
       renderStudents();
+      for (const [pid, text] of drafts) {
+        const f = fbForms.get(pid);
+        if (f) { f.box.value = text; f.setMsg('muted', t('fb_unsaved')); }
+      }
       const meta = data.exam.className ? `${t('class_name')}: ${data.exam.className}` : '';
       document.getElementById('meta-summary').textContent = [meta, data.materials.length ? `${t('exam_materials')}: ${data.materials.length}` : ''].filter(Boolean).join(' · ');
       const anySubmitted = data.participants.some((p) => p.submittedAt);
-      document.getElementById('ai-box').hidden = !data.questions.some((q) => q.kind === 'text' || q.kind === 'code') || !anySubmitted;
+      document.getElementById('ai-box').hidden = !anySubmitted;
+      document.getElementById('ai-grade-box').hidden = !data.questions.some((q) => q.kind === 'text' || q.kind === 'code');
       document.getElementById('tests-box').hidden = !data.questions.some((q) => q.kind === 'code' && q.tests && q.tests.length) || !anySubmitted;
     }
 

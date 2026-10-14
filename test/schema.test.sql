@@ -353,3 +353,22 @@ select pg_temp.check(get_exam(:chem2)->'materialIds' = jsonb_build_array(:mat2),
 select pg_temp.check(get_exam(:chem2)->>'className' is not distinct from get_exam(:chem_id)->>'className', 'класс скопирован');
 set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
 select pg_temp.expect_error(format($$ select copy_exam(%s, 'Чужой') $$, :code_id), 'not_found');
+
+-- ---------- отзыв ученику ----------
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check(exam_results(:code_id)->'participants'->0->'feedback' = 'null'::jsonb, 'отзыва пока нет');
+select pg_temp.check(save_feedback(:pid_c, '  Молодец, повтори циклы.  ', 'ai')->>'source' = 'ai', 'отзыв ИИ сохранён');
+select pg_temp.check(exam_results(:code_id)->'participants'->0->'feedback'->>'text' = 'Молодец, повтори циклы.', 'текст отзыва без пробелов по краям');
+select save_feedback(:pid_c, 'Исправлено учителем');
+select pg_temp.check(exam_results(:code_id)->'participants'->0->'feedback'->>'source' = 'teacher', 'по умолчанию отзыв от учителя');
+select pg_temp.expect_error(format($$ select save_feedback(%s, 'x', 'student') $$, :pid_c), 'invalid_request');
+select save_feedback(:pid_c, ' ');
+select pg_temp.check(exam_results(:code_id)->'participants'->0->'feedback' = 'null'::jsonb, 'пустой текст удаляет отзыв');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error(format($$ select save_feedback(%s, 'Чужой') $$, :pid_c), 'not_found');
+reset request.jwt.claim.sub;
+reset role;
+set role anon;
+select pg_temp.expect_error(format($$ select save_feedback(%s, 'Сам себе') $$, :pid_c), 'unauthorized');

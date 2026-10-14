@@ -196,12 +196,28 @@
               p.submittedAt ? null : el('span', { class: 'muted' }, t('not_submitted')),
               el('span', { class: 'muted' }, `${t('graded')}: ${p.gradedCount} / ${data.questions.length}`),
               aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
-          items, p.submittedAt ? feedbackForm(p) : null);
+          items, p.submittedAt ? feedbackForm(p) : null,
+          el('div', { class: 'row', style: 'margin-top:12px; justify-content:flex-end' },
+            el('button', { class: 'danger small', onclick: (e) => deleteStudent(p, e.target) }, t('delete_student'))));
         card.open = openCards.has(p.id);
         card.addEventListener('toggle', () => { if (card.open) openCards.add(p.id); else openCards.delete(p.id); });
         return card;
       }));
       document.getElementById('students-tools').hidden = !data.participants.length;
+    }
+
+    // Удаление ученика вместе с его ответами, оценками и отзывом.
+    async function deleteStudent(p, button) {
+      if (!confirm(t('delete_student_confirm').replace('{name}', p.name))) return;
+      button.disabled = true;
+      try {
+        await rpc('delete_participant', { p_participant_id: p.id });
+        openCards.delete(p.id);
+        await load();
+      } catch (err) {
+        button.disabled = false;
+        alert(err.message);
+      }
     }
 
     // Карточки учеников свёрнуты; какие раскрыты — помним, пока открыта страница.

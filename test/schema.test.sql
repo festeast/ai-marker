@@ -372,3 +372,26 @@ reset request.jwt.claim.sub;
 reset role;
 set role anon;
 select pg_temp.expect_error(format($$ select save_feedback(%s, 'Сам себе') $$, :pid_c), 'unauthorized');
+
+-- ---------- удаление ученика ----------
+reset role;
+set role anon;
+select join_exam(:'code_code', 'Лишний') as tx \gset
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (p->>'id')::bigint as pid_x from jsonb_array_elements(exam_results(:code_id)->'participants') p where p->>'name' = 'Лишний' \gset
+select save_feedback(:pid_c, 'Отзыв Ерлану');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error(format('select delete_participant(%s)', :pid_x), 'not_found');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select delete_participant(:pid_x);
+select pg_temp.check(jsonb_array_length(exam_results(:code_id)->'participants') = 1, 'остался один ученик');
+select pg_temp.check(exam_results(:code_id)->'participants'->0->'feedback'->>'text' = 'Отзыв Ерлану', 'данные другого ученика не тронуты');
+select pg_temp.check((exam_results(:code_id)->'participants'->0->>'total') = '3.5', 'оценки другого ученика не тронуты');
+select pg_temp.expect_error(format('select delete_participant(%s)', :pid_x), 'not_found');
+select delete_participant(:pid_c);
+select pg_temp.check(exam_results(:code_id)->'participants' = '[]'::jsonb, 'ученик удалён');
+reset role;
+select pg_temp.check(not exists (select from answers where participant_id = :pid_c)
+  and not exists (select from feedback where participant_id = :pid_c), 'ответы и отзыв удалены');

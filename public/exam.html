@@ -21,9 +21,20 @@
         <button type="submit" data-i18n="start"></button>
       </form>
     </div>
+    <div class="card strict-gate" id="gate" hidden>
+      <h2 id="gate-title"></h2>
+      <p data-i18n="strict_notice"></p>
+      <p class="warn" id="gate-leaves"></p>
+      <button id="gate-btn"></button>
+    </div>
+    <div class="card" id="locked" hidden>
+      <h2 class="error" data-i18n="locked_title"></h2>
+      <p data-i18n="locked_msg"></p>
+    </div>
     <div id="attempt" hidden>
       <div class="conn-bar" id="offline" role="status" hidden></div>
-      <div class="notice" data-i18n="monitor_notice"></div>
+      <div class="notice" id="notice" data-i18n="monitor_notice"></div>
+      <p class="muted" id="strict-warn" hidden></p>
       <div id="questions"></div>
       <div class="row spread">
         <span class="muted" id="save-state" data-i18n="autosaved"></span>
@@ -33,6 +44,7 @@
     <div class="card" id="done" hidden><p class="ok" data-i18n="submitted_msg"></p></div>
     <div class="error" id="err"></div>
   </main>
+  <div class="strict-toast" id="toast" role="alert" hidden></div>
   <script>
     const code = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
     const storeKey = 'attempt:' + code;
@@ -46,6 +58,110 @@
     // ---------- отслеживание: уход со страницы и вставки ----------
     let away = false, awaySince = 0, suppress = false;
 
+    // ---------- строгий режим ----------
+    // Экзамен идёт на весь экран; копирование, вставка, печать и правый клик запрещены.
+    // Запретить переход на другую вкладку браузер не даёт, поэтому каждый выход считается,
+    // а после maxLeaves выходов сервер блокирует работу, пока учитель её не разблокирует.
+    let strict = null, leaves = 0, locked = false, started = false, lockPoll = null;
+    let wantFs = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    const inFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+    async function enterFullscreen() {
+      const root = document.documentElement;
+      const req = root.requestFullscreen || root.webkitRequestFullscreen;
+      if (!wantFs || !req) return;
+      try { await req.call(root); } catch { wantFs = false; } // браузер отказал — работаем без полного экрана
+    }
+    function leaveFullscreen() {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (inFullscreen() && exit) try { Promise.resolve(exit.call(document)).catch(() => {}); } catch {}
+    }
+
+    function showToast() {
+      const box = document.getElementById('toast');
+      box.textContent = t('strict_blocked');
+      box.hidden = false;
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => { box.hidden = true; }, 2000);
+    }
+
+    function updateStrictWarn() {
+      const text = strict && strict.maxLeaves
+        ? t('strict_lock_warn').replace('{n}', strict.maxLeaves).replace('{k}', leaves) : '';
+      const line = document.getElementById('strict-warn');
+      line.hidden = !text; line.textContent = text;
+      line.className = leaves ? 'warn' : 'muted';
+      document.getElementById('gate-leaves').textContent = leaves ? text : '';
+    }
+
+    function showGate(back) {
+      if (finished || locked) return;
+      document.getElementById('gate-title').textContent = t(back ? 'strict_back_title' : 'strict_on');
+      document.getElementById('gate-btn').textContent = t(back ? 'strict_back' : 'strict_start');
+      document.getElementById('gate').hidden = false;
+      document.getElementById('attempt').hidden = true;
+    }
+    function hideGate() {
+      if (finished || locked) return;
+      document.getElementById('gate').hidden = true;
+      document.getElementById('attempt').hidden = false;
+    }
+
+    function lockAttempt() {
+      if (locked || finished) return;
+      locked = true;
+      document.getElementById('attempt').hidden = true;
+      document.getElementById('gate').hidden = true;
+      document.getElementById('locked').hidden = false;
+      // Ждём, пока учитель разблокирует работу.
+      clearInterval(lockPoll);
+      lockPoll = setInterval(async () => {
+        try {
+          const data = await rpc('get_attempt', { p_token: token }, 10000);
+          if (data.submitted) { clearInterval(lockPoll); return finishAttempt(); }
+          if (data.locked) return;
+          clearInterval(lockPoll);
+          locked = false; leaves = data.leaveCount || 0;
+          document.getElementById('locked').hidden = true;
+          updateStrictWarn();
+          if (wantFs && !inFullscreen()) showGate(true); else hideGate();
+          if (dirty || submitPending) flush();
+        } catch {}
+      }, 5000);
+    }
+
+    function startStrict() {
+      document.body.classList.add('strict');
+      const block = (e) => { if (finished) return; e.preventDefault(); showToast(); };
+      document.addEventListener('contextmenu', block);
+      document.addEventListener('copy', block);
+      document.addEventListener('cut', block);
+      document.addEventListener('dragstart', block);
+      document.addEventListener('keydown', (e) => {
+        const k = (e.key || '').toLowerCase(), mod = e.ctrlKey || e.metaKey;
+        if (e.key === 'F12' || (mod && ['p', 's', 'u', 'o'].includes(k)) || (mod && e.shiftKey && ['i', 'j', 'c'].includes(k))) block(e);
+      });
+      window.addEventListener('beforeunload', (e) => {
+        if (finished || locked || submitPending) return;
+        e.preventDefault(); e.returnValue = t('leave_warn');
+      });
+      const onFs = () => {
+        if (!started || finished || locked) return;
+        if (inFullscreen()) { hideGate(); markBack(); }
+        else if (wantFs && !suppress) { markAway('fullscreen'); showGate(true); }
+      };
+      document.addEventListener('fullscreenchange', onFs);
+      document.addEventListener('webkitfullscreenchange', onFs);
+      document.getElementById('gate-btn').addEventListener('click', async () => {
+        await enterFullscreen();
+        if (!started) { started = true; startTracking(); }
+        hideGate();
+        markBack();
+      });
+      updateStrictWarn();
+      showGate(false);
+    }
+
     function sendEvent(type, detail) {
       if (finished) return;
       if (eventQueue.length < 200) eventQueue.push({ type, detail });
@@ -55,9 +171,15 @@
       if (away || suppress || finished) return;
       away = true; awaySince = Date.now();
       sendEvent('leave', { reason });
+      if (strict) {
+        leaves++;
+        updateStrictWarn();
+        if (strict.maxLeaves && leaves >= strict.maxLeaves) lockAttempt();
+      }
     }
     function markBack() {
       if (!away || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+      if (strict && wantFs && !inFullscreen()) return; // вернётся, когда снова откроет экзамен на весь экран
       away = false;
       sendEvent('return', { awayMs: Date.now() - awaySince });
     }
@@ -80,16 +202,19 @@
         try { localStorage.setItem(storeKey + ':closedAt', String(Date.now())); } catch {}
         rpcKeepalive('log_event', { p_token: token, p_type: 'leave', p_detail: { reason: 'close' } });
       });
+      // В строгом режиме вставка запрещена, но попытка всё равно записывается.
       document.addEventListener('paste', (e) => {
         const text = (e.clipboardData && e.clipboardData.getData('text')) || '';
         const q = e.target.closest && e.target.closest('[data-qid]');
-        sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null });
+        if (strict) { e.preventDefault(); showToast(); }
+        sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null, blocked: !!strict });
       });
       document.addEventListener('drop', (e) => {
         const text = (e.dataTransfer && e.dataTransfer.getData('text')) || '';
+        if (strict) { e.preventDefault(); if (text) showToast(); }
         if (!text) return;
         const q = e.target.closest && e.target.closest('[data-qid]');
-        sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null });
+        sendEvent('paste', { text, questionId: q ? Number(q.dataset.qid) : null, blocked: !!strict });
       });
       setInterval(() => {
         if (finished || !online) return;
@@ -154,7 +279,9 @@
         setConn(dirty ? 'saving' : 'saved');
       } catch (err) {
         dirty = true;
-        if (retryable(err)) goOffline(); else showError(err);
+        if (retryable(err)) goOffline();
+        else if (err.code === 'attempt_locked') lockAttempt();
+        else showError(err);
       } finally { busy = false; }
       if (online) { if (dirty) saveTimer = setTimeout(flush, 800); flushEvents(); }
     }
@@ -196,7 +323,7 @@
           submitPending = false;
           try { localStorage.removeItem(submitKey); } catch {}
           setConn('saved');
-          showError(err);
+          if (err.code === 'attempt_locked') lockAttempt(); else showError(err);
         }
       } finally { submitting = false; }
     }
@@ -286,6 +413,9 @@
 
     function showDone() {
       finished = true;
+      clearInterval(lockPoll);
+      leaveFullscreen();
+      for (const id of ['gate', 'locked']) document.getElementById(id).hidden = true;
       document.getElementById('attempt').hidden = true;
       document.getElementById('join').hidden = true;
       document.getElementById('done').hidden = false;
@@ -306,9 +436,17 @@
         }
       }
       renderQuestions(data);
-      document.getElementById('attempt').hidden = false;
       setConn('saved');
-      startTracking();
+      if (data.exam.strictMode) {
+        strict = { maxLeaves: data.exam.maxLeaves || null };
+        leaves = data.leaveCount || 0;
+        document.getElementById('notice').textContent = t('strict_notice');
+        startStrict();
+        if (data.locked) lockAttempt();
+      } else {
+        document.getElementById('attempt').hidden = false;
+        startTracking();
+      }
       if (submitPending || dirty) flush();
     }
 

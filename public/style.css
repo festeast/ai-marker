@@ -178,7 +178,11 @@ body.has-tools main.wrap { padding-bottom: 96px; }
 .tool-panel { position: fixed; right: 12px; bottom: 76px; z-index: 31; width: min(420px, calc(100vw - 16px)); max-height: calc(100vh - 100px); overflow: auto;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
 .tool-panel.wide { width: min(860px, calc(100vw - 16px)); }
-@media (max-width: 600px) { .tool-panel { right: 8px; left: 8px; width: auto; } .tool-panel.wide { width: auto; } }
+@media (max-width: 600px) {
+  .tool-panel { right: 8px; left: 8px; width: auto; } .tool-panel.wide { width: auto; }
+  .tools-dock { left: 8px; right: 8px; transform: none; max-width: none; gap: 4px; }
+  .tools-dock button { flex: 1 1 auto; padding: 6px 6px; font-size: 13px; }
+}
 .tool-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
 .tool-head h2 { margin: 0; font-size: 17px; }
 .tool-sheet { white-space: pre-wrap; word-break: break-word; font-size: 15px; }
@@ -192,6 +196,7 @@ body.has-tools main.wrap { padding-bottom: 96px; }
 .calc-key.eq { grid-column: span 2; background: var(--accent); color: var(--accent-ink); }
 .calc-history { list-style: none; padding: 0; margin: 8px 0 0; font: 14px ui-monospace, monospace; max-height: 140px; overflow: auto; }
 .calc-history li { padding: 3px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.graph-fn span { white-space: nowrap; }
 .graph-fn { display: flex; gap: 8px; align-items: center; margin: 4px 0; color: var(--text); font: 15px ui-monospace, monospace; }
 .graph-fn input.bad { border-color: var(--bad); }
 .graph-canvas { display: block; width: 100%; height: 320px; border: 1px solid var(--line); border-radius: 8px; margin-top: 8px; touch-action: none; cursor: crosshair; }

@@ -38,6 +38,10 @@ const ExamTools = (() => {
     panel.classList.toggle('wide', k === 'periodic' || k === 'graph');
     if (!built[k]) built[k] = BUILD[k]();
     body.replaceChildren(built[k].node);
+    // панель над кнопками: на узком экране они могут занять две строки
+    const gap = dock.offsetHeight + 20;
+    panel.style.bottom = gap + 'px';
+    panel.style.maxHeight = `calc(100vh - ${gap + 16}px)`;
     panel.hidden = false;
     if (built[k].onShow) built[k].onShow();
   }

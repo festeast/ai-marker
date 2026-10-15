@@ -287,10 +287,10 @@
       lang.value = LANG;
       const wishes = el('input', { type: 'text', maxlength: 500, placeholder: t('gen_wishes_placeholder') });
       const model = el('select', {}, el('option', { value: 'free' }, t('ai_model_free')), el('option', { value: 'paid' }, t('ai_model_paid')),
-        el('option', { value: 'paid:glm' }, t('ai_model_paid_glm')));
+        el('option', { value: 'paid:gpt' }, t('ai_model_paid_gpt')));
       let saved = 'free';
       try { saved = localStorage.getItem('aiQuality') || 'free'; } catch {}
-      if (saved === 'paid' || saved === 'paid:glm') model.value = saved;
+      if (saved === 'paid' || saved === 'paid:gpt') model.value = saved;
       const genKind = el('select', {}, el('option', { value: 'quiz' }, t('type_quiz')), el('option', { value: 'text' }, t('type_text')));
       const msg = el('span', { class: 'muted' });
       const btn = el('button', { type: 'button' }, t('gen_btn'));

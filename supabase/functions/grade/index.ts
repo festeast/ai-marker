@@ -7,7 +7,7 @@
 // Нужен один из секретов (Supabase → Edge Functions → Secrets):
 // ANTHROPIC_API_KEY — ключ Anthropic, или OPENROUTER_API_KEY — ключ OpenRouter
 // (бесплатная модель по умолчанию — секрет OPENROUTER_FREE_MODEL,
-// платная по выбору учителя — секрет OPENROUTER_MODEL, вторая платная «Z.ai GLM» — секрет OPENROUTER_GLM_MODEL).
+// платная по выбору учителя — секрет OPENROUTER_MODEL, вторая платная «ChatGPT 4o» — секрет OPENROUTER_GPT_MODEL).
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { betaZodOutputFormat } from "npm:@anthropic-ai/sdk@0.128.0/helpers/beta/zod";
 import { z } from "npm:zod@4.6.5";
@@ -16,7 +16,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.117.2";
 const MODEL = "claude-opus-5-5";
 const OPENROUTER_MODEL = "anthropic/claude-opus-5.5";
 const OPENROUTER_FREE_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
-const OPENROUTER_GLM_MODEL = "z-ai/glm-5.2";
+const OPENROUTER_GPT_MODEL = "openai/gpt-4o";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -201,12 +201,12 @@ async function askAnthropic<T>(apiKey: string, task: AiTask<T>, content: string)
 }
 
 // OpenRouter: OpenAI-совместимый API, ответ просим строго по JSON-схеме.
-// quality: "paid" — платная модель (Claude); "paid:glm" — платная Z.ai GLM;
+// quality: "paid" — платная модель (Claude); "paid:gpt" — платная ChatGPT 4o;
 // "free:<id>" — выбранная бесплатная модель (id оканчивается на ":free"); иначе — бесплатная по умолчанию.
 // strict — просить ответ строго по JSON-схеме (не все модели это умеют, остальным пишем словами).
 function pickModel(quality: unknown): { model: string; paid: boolean; strict: boolean } {
   if (quality === "paid") return { model: Deno.env.get("OPENROUTER_MODEL") || OPENROUTER_MODEL, paid: true, strict: true };
-  if (quality === "paid:glm") return { model: Deno.env.get("OPENROUTER_GLM_MODEL") || OPENROUTER_GLM_MODEL, paid: true, strict: false };
+  if (quality === "paid:gpt") return { model: Deno.env.get("OPENROUTER_GPT_MODEL") || OPENROUTER_GPT_MODEL, paid: true, strict: true };
   if (typeof quality === "string" && quality.startsWith("free:") && quality.endsWith(":free")) {
     return { model: quality.slice(5), paid: false, strict: false };
   }

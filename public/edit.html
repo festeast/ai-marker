@@ -286,10 +286,11 @@
       const lang = el('select', {}, ['ru', 'kk', 'en', 'tr'].map((code) => el('option', { value: code }, t('gen_lang_' + code))));
       lang.value = LANG;
       const wishes = el('input', { type: 'text', maxlength: 500, placeholder: t('gen_wishes_placeholder') });
-      const model = el('select', {}, el('option', { value: 'free' }, t('ai_model_free')), el('option', { value: 'paid' }, t('ai_model_paid')));
+      const model = el('select', {}, el('option', { value: 'free' }, t('ai_model_free')), el('option', { value: 'paid' }, t('ai_model_paid')),
+        el('option', { value: 'paid:glm' }, t('ai_model_paid_glm')));
       let saved = 'free';
       try { saved = localStorage.getItem('aiQuality') || 'free'; } catch {}
-      if (saved === 'paid') model.value = 'paid';
+      if (saved === 'paid' || saved === 'paid:glm') model.value = saved;
       const genKind = el('select', {}, el('option', { value: 'quiz' }, t('type_quiz')), el('option', { value: 'text' }, t('type_text')));
       const msg = el('span', { class: 'muted' });
       const btn = el('button', { type: 'button' }, t('gen_btn'));
@@ -301,7 +302,7 @@
           const res = await callFunction('grade', {
             action: 'generate', materialId: Number(material.value), count: Number(count.value) || 5,
             examType: exam.type === 'mixed' ? genKind.value : exam.type, lang: lang.value, wishes: wishes.value,
-            quality: model.value === 'paid' ? 'paid' : (saved.startsWith('free:') ? saved : 'free'),
+            quality: model.value !== 'free' ? model.value : (saved.startsWith('free:') ? saved : 'free'),
           });
           // Пустые вопросы-заготовки убираем, новые добавляем в конец.
           exam.questions = exam.questions.filter((q) => q.text.trim());

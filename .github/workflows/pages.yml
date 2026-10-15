@@ -25,6 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # Браузер держит старые .js и .css в кэше, и новая страница может получить старые скрипты.
+      # Добавляем к ним версию коммита, чтобы после обновления сайта всё загрузилось заново.
+      - name: Версия скриптов и стилей
+        run: sed -i -E "s/(src|href)=\"([a-z0-9-]+\.(js|css))\"/\1=\"\2?v=${GITHUB_SHA::8}\"/g" public/*.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public

@@ -224,3 +224,9 @@ body.strict #questions textarea { -webkit-user-select: text; user-select: text; 
 @media print { body.strict main { display: none; } }
 /* пока вопросы скрыты (заставка строгого режима, блокировка, работа сдана) — инструментов не видно */
 body:has(#attempt[hidden]) .tools-dock, body:has(#attempt[hidden]) .tool-panel { display: none; }
+.tool-notice { position: fixed; left: 50%; transform: translateX(-50%); bottom: 72px; z-index: 32; background: #dcf3e5; color: var(--text);
+  border: 1px solid #b6e2c6; border-radius: 10px; padding: 8px 14px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: calc(100vw - 24px); }
+.tool-ask-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.tool-ask-row > span:first-child { flex: 1; }
+.tool-req { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.tool-req:last-child { border-bottom: 0; }

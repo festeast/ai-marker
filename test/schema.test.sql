@@ -249,6 +249,40 @@ select pg_temp.check((select (select string_agg(o->>'i', ',') from jsonb_array_e
 select pg_temp.check((select string_agg(o->>'text', ',' order by (o->>'i')::int) from jsonb_array_elements((:'a1'::jsonb)->'questions') q,
   jsonb_array_elements(q->'options') o where q->>'kind' = 'order') = '1,5,10,50', 'варианты помечены номерами учителя');
 select pg_temp.check(get_attempt(:'t1')->'questions' = (:'a1'::jsonb)->'questions', 'перемешивание не меняется при перезагрузке');
+-- запросы инструментов
+select pg_temp.expect_error(format($$ select request_tool(%L, 'phone') $$, :'t1'), 'invalid_tool');
+select pg_temp.check(request_tool(:'t1', 'calculator')->'requests' = '[]'::jsonb, 'уже доступный инструмент не запрашивается');
+select pg_temp.check(request_tool(:'t1', 'code')->'requests' = '[{"tool": "code", "status": "pending"}]'::jsonb, 'запрос отправлен');
+select request_tool(:'t2', 'code');
+reset role;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+set role authenticated;
+select pg_temp.expect_error(format('select list_tool_requests(%s)', :mix_id), 'not_found');
+reset role;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+set role authenticated;
+select list_tool_requests(:mix_id) as tr \gset
+select pg_temp.check(jsonb_array_length((:'tr'::jsonb)->'requests') = 2, 'учитель видит два запроса');
+select (r->>'participantId')::bigint as tr_p1 from jsonb_array_elements((:'tr'::jsonb)->'requests') r where r->>'name' = 'Айдана' \gset
+select decide_tool_requests(:mix_id, 'code', true, 'one', :tr_p1);
+select pg_temp.check((select r->>'status' from jsonb_array_elements(decide_tool_requests(:mix_id, 'code', false, 'requested')->'requests') r
+  where r->>'name' = 'Бауыржан') = 'denied', 'отказ всем, кто ждёт');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.check(attempt_tools(:'t1')->'tools' ? 'code', 'инструмент выдан одному ученику');
+select pg_temp.check(get_attempt(:'t1')->'exam'->'tools' ? 'code', 'выданный инструмент виден при загрузке');
+select pg_temp.check(not (attempt_tools(:'t2')->'tools' ? 'code'), 'другому ученику не выдан');
+select pg_temp.check(request_tool(:'t2', 'code')->'requests'->0->>'status' = 'pending', 'после отказа можно попросить снова');
+reset role;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+set role authenticated;
+select pg_temp.check(decide_tool_requests(:mix_id, 'code', true, 'everyone')->'tools' ? 'code', 'инструмент включён для всего экзамена');
+select set_exam_tools(:mix_id, array['calculator', 'periodic', 'sheet'], 'pV = nRT');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.check(attempt_tools(:'t2')->'requests'->0->>'status' = 'granted', 'ожидающий запрос выполнен');
 select submit_attempt(:'t1', jsonb_build_object(:'q_choice', '0', :'q_tf', '0', :'q_order', '0,1,2,3', :'q_text', 'Свет и хлорофилл'));
 select submit_attempt(:'t2', jsonb_build_object(:'q_choice', '1', :'q_tf', '1', :'q_order', '3,2,1,0'));
 

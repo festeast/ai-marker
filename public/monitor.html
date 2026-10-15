@@ -27,6 +27,7 @@
       <p class="row"><a class="btn secondary" id="results-link" data-i18n="results"></a>
         <button class="danger small" id="close" hidden data-i18n="close_exam"></button></p>
     </div>
+    <div class="card" id="tool-requests" hidden></div>
     <details class="card" id="tools-box" hidden>
       <summary><b data-i18n="tools_title"></b> <span class="muted" id="tools-summary"></span></summary>
       <div id="tools" style="margin-top:12px"></div>
@@ -48,7 +49,7 @@
     const id = Number(new URLSearchParams(location.search).get('id'));
     document.getElementById('results-link').href = 'results.html?id=' + id;
     let lastEventId = 0;
-    let toolsShown = false;
+    let toolsShown = false, toolsExam = null;
 
     // Инструменты можно включить и во время экзамена (ученик увидит их после перезагрузки страницы).
     function showTools(exam) {
@@ -57,6 +58,8 @@
         document.getElementById('tools-summary').textContent = (exam.tools || []).length
           ? '— ' + exam.tools.map((k) => t('tool_' + k)).join(', ') : '— ' + t('tools_none');
       };
+      toolsExam = exam;
+      exam.refreshTools = () => { renderToolsEditor(document.getElementById('tools'), exam, { heading: false, onSave: summary }); summary(); };
       renderToolsEditor(document.getElementById('tools'), exam, { heading: false, onSave: summary });
       summary();
       box.hidden = false;
@@ -123,6 +126,50 @@
       catch (err) { btn.disabled = false; document.getElementById('err').textContent = err.message; }
     }
 
+    // Запросы инструментов от учеников: дать одному, всем, кто попросил, или всем ученикам.
+    const TOOL_ICONS = { calculator: '🧮', graph: '📈', code: '💻', periodic: '⚛', sheet: '📄' };
+    let reqSig = '';
+    function renderToolRequests(data, force) {
+      const sig = JSON.stringify(data.requests);
+      if (sig === reqSig && !force) return;
+      reqSig = sig;
+      const box = document.getElementById('tool-requests');
+      box.hidden = !data.requests.length;
+      if (toolsExam && JSON.stringify(toolsExam.tools) !== JSON.stringify(data.tools)) { toolsExam.tools = data.tools; toolsExam.refreshTools(); }
+      const msg = el('span', { class: 'error' });
+      const decide = (tool, grant, scope, participantId) => async (e) => {
+        e.target.disabled = true;
+        try {
+          renderToolRequests(await rpc('decide_tool_requests', { p_exam_id: id, p_tool: tool, p_grant: grant, p_scope: scope, p_participant_id: participantId ?? null }), true);
+        } catch (err) { msg.textContent = err.message; e.target.disabled = false; }
+      };
+      const pending = data.requests.filter((r) => r.status === 'pending');
+      const groups = [...new Set(pending.map((r) => r.tool))].map((tool) => {
+        const list = pending.filter((r) => r.tool === tool);
+        return el('div', { class: 'tool-req' },
+          el('b', {}, TOOL_ICONS[tool] + ' ' + t('tool_' + tool)), ' ', el('span', { class: 'muted' }, t('tool_req_asked') + ': ' + list.length),
+          list.map((r) => el('div', { class: 'row', style: 'margin-top:6px' },
+            el('span', {}, r.name), el('span', { class: 'muted' }, fmtTime(r.createdAt)),
+            el('button', { class: 'small', onclick: decide(tool, true, 'one', r.participantId) }, t('tool_grant')),
+            el('button', { class: 'secondary small', onclick: decide(tool, false, 'one', r.participantId) }, t('tool_deny')))),
+          el('div', { class: 'row', style: 'margin-top:8px' },
+            list.length > 1 ? el('button', { class: 'small', onclick: decide(tool, true, 'requested') }, t('tool_grant_requested')) : null,
+            el('button', { class: 'secondary small', onclick: decide(tool, true, 'everyone') }, t('tool_grant_everyone')),
+            list.length > 1 ? el('button', { class: 'danger small', onclick: decide(tool, false, 'requested') }, t('tool_deny_requested')) : null));
+      });
+      const done = data.requests.filter((r) => r.status !== 'pending');
+      box.replaceChildren(
+        el('h2', {}, t('tool_requests'), pending.length ? el('span', { class: 'badge flag', style: 'margin-left:8px' }, String(pending.length)) : null),
+        groups.length ? el('div', {}, groups) : el('p', { class: 'muted' }, t('tool_req_none')),
+        done.length ? el('details', { style: 'margin-top:8px' }, el('summary', { class: 'muted' }, t('tool_req_done') + ': ' + done.length),
+          el('ul', { class: 'events' }, done.map((r) => el('li', {}, el('b', {}, r.name), ' — ', t('tool_' + r.tool + '_short'), ': ', t('tool_req_' + r.status))))) : null,
+        msg);
+    }
+    async function pollToolRequests() {
+      try { renderToolRequests(await rpc('list_tool_requests', { p_exam_id: id })); } catch {}
+      setTimeout(pollToolRequests, 5000);
+    }
+
     async function poll() {
       try {
         const data = await rpc('exam_monitor', { p_exam_id: id, p_after: lastEventId });
@@ -161,7 +208,7 @@
       await rpc('close_exam', { p_exam_id: id });
     });
 
-    requireLogin().then(poll).catch(showPageError);
+    requireLogin().then(() => { poll(); pollToolRequests(); }).catch(showPageError);
   </script>
 </body>
 </html>

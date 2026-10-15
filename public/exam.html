@@ -439,7 +439,11 @@
         }
       }
       renderQuestions(data);
-      ExamTools.mount(data.exam.tools, { sheet: data.exam.toolsSheet, storeKey });
+      ExamTools.mount(data.exam.tools, {
+        sheet: data.exam.toolsSheet, storeKey, requests: data.exam.toolRequests,
+        ask: (tool) => rpc('request_tool', { p_token: token, p_tool: tool }, 15000),
+        refresh: () => (finished || !online ? Promise.resolve(null) : rpc('attempt_tools', { p_token: token }, 10000)),
+      });
       setConn('saved');
       if (data.exam.strictMode) {
         strict = { maxLeaves: data.exam.maxLeaves || null };

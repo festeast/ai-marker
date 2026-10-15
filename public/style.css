@@ -233,3 +233,22 @@ body:has(#attempt[hidden]) .tools-dock, body:has(#attempt[hidden]) .tool-panel {
 .confirm-dialog { border: 1px solid var(--line); border-radius: 12px; padding: 20px; max-width: min(420px, calc(100vw - 32px)); box-shadow: 0 8px 28px rgba(0,0,0,.2); }
 .confirm-dialog::backdrop { background: rgba(0,0,0,.35); }
 .confirm-dialog p { margin-top: 0; }
+
+/* Рубрика, проверка по вопросу, похожие ответы, банк вопросов */
+.nowrap { white-space: nowrap; }
+pre.answer-view { margin: 6px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font: inherit; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+.rubric-table { width: auto; margin: 8px 0; font-size: 14px; }
+.rubric-table td, .rubric-table th { padding: 4px 8px; }
+.rubric-table input { margin: 0; }
+.rubric-row { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; align-items: center; margin-top: 6px; }
+.rubric-row input { margin: 0; }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 6px; }
+@media (max-width: 600px) { .compare { grid-template-columns: 1fr; } .rubric-row { grid-template-columns: 1fr 80px auto; } }
+details.copy-pair { border-top: 1px solid var(--line); padding: 8px 0; }
+details.copy-pair summary { cursor: pointer; }
+.bank-list { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin-top: 8px; }
+.bank-item { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.bank-item:last-child { border-bottom: 0; }
+.bank-item label { margin: 0; color: var(--text); font-size: 15px; display: flex; gap: 8px; align-items: flex-start; }
+.bank-item.disabled { opacity: .55; }
+.bank-item > button { width: auto; justify-self: end; }

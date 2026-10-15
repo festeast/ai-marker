@@ -31,6 +31,8 @@ alter table public.exams add column if not exists tools_sheet text;
 -- блокируется (participants.locked_at), пока учитель её не разблокирует.
 alter table public.exams add column if not exists strict_mode boolean not null default false;
 alter table public.exams add column if not exists max_leaves int;
+-- Добавлено позже: каждому ученику — свой вариант из pick_count случайных вопросов экзамена (null — все вопросы).
+alter table public.exams add column if not exists pick_count int;
 
 create table if not exists public.questions (
   id bigint generated always as identity primary key,
@@ -63,6 +65,9 @@ alter table public.questions add constraint questions_kind_check check (kind in 
 alter table public.questions add column if not exists code_lang text;
 alter table public.questions add column if not exists starter text;
 alter table public.questions add column if not exists tests jsonb;
+-- Добавлено позже: критерии оценки (рубрика) открытого вопроса или кода:
+-- [{ "text": "Названа главная мысль", "points": 2 }, ...]; баллы вопроса = сумма баллов критериев.
+alter table public.questions add column if not exists rubric jsonb;
 
 create table if not exists public.participants (
   id bigint generated always as identity primary key,
@@ -95,6 +100,8 @@ create table if not exists public.grades (
 );
 alter table public.grades drop constraint if exists grades_source_check;
 alter table public.grades add constraint grades_source_check check (source in ('teacher', 'ai', 'tests'));
+-- Добавлено позже: баллы по каждому критерию рубрики, по порядку ([2, 0.5, 1]); score — их сумма.
+alter table public.grades add column if not exists criteria jsonb;
 
 -- Отзыв ученику по всему экзамену: сильные стороны, ошибки, что повторить.
 -- source: ai (составил ИИ) | teacher (написал или исправил учитель).
@@ -171,7 +178,7 @@ language sql stable as $$
     'id', e.id, 'title', e.title, 'type', e.type, 'status', e.status, 'code', e.code,
     'createdAt', e.created_at, 'publishedAt', e.published_at, 'className', e.class_name, 'shuffle', e.shuffle,
     'tools', to_jsonb(e.tools), 'toolsSheet', e.tools_sheet,
-    'strictMode', e.strict_mode, 'maxLeaves', e.max_leaves)
+    'strictMode', e.strict_mode, 'maxLeaves', e.max_leaves, 'pickCount', e.pick_count)
 $$;
 
 create or replace function public._questions_json(p_exam_id bigint, p_with_answers boolean) returns jsonb
@@ -181,10 +188,27 @@ language sql stable as $$
       'id', q.id, 'kind', q.kind, 'text', q.text, 'options', q.options, 'points', q.points,
       'correctIndex', case when p_with_answers then q.correct_index end,
       'reference', case when p_with_answers then q.reference end,
+      'rubric', case when p_with_answers then q.rubric end,
       'lang', q.code_lang, 'starter', q.starter,
       'tests', case when p_with_answers then q.tests end))
     order by q.position), '[]'::jsonb)
   from public.questions q where q.exam_id = p_exam_id
+$$;
+
+-- Вариант ученика: при pick_count — столько случайных вопросов экзамена, свои для каждого
+-- ученика (seed — его токен) и одни и те же при перезагрузке; без pick_count — все вопросы.
+create or replace function public._picked_ids(e public.exams, p_seed text) returns bigint[]
+language sql stable security definer set search_path = public as $$
+  select coalesce(array_agg(id), '{}') from (
+    select id from questions where exam_id = e.id
+    order by md5(p_seed || ':pick:' || id) limit e.pick_count) s
+$$;
+
+-- Вопросы, которые достались ученику.
+create or replace function public._p_questions(p public.participants) returns setof public.questions
+language sql stable security definer set search_path = public as $$
+  select q.* from questions q join exams e on e.id = q.exam_id
+  where q.exam_id = p.exam_id and (e.pick_count is null or q.id = any(_picked_ids(e, p.token::text)))
 $$;
 
 -- Верен ли ответ на вопрос с автопроверкой (для открытого вопроса — null).
@@ -216,6 +240,7 @@ declare
   n int;
 begin
   for q in select * from questions where exam_id = e.id
+             and (e.pick_count is null or id = any(_picked_ids(e, p_seed)))
            order by case when e.shuffle then md5(p_seed || ':q' || id) end, position loop
     if q.kind in ('text', 'code') or q.options is null then
       res := res || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('id', q.id, 'kind', q.kind, 'text', q.text, 'points', q.points,
@@ -272,7 +297,7 @@ begin
   insert into answers (participant_id, question_id, value, updated_at)
   select p.id, q.id, left(a.value, 50000), now()
   from jsonb_each_text(p_answers) a
-  join questions q on q.exam_id = p.exam_id and q.id::text = a.key
+  join _p_questions(p) q on q.id::text = a.key
   where a.value is not null
   on conflict (participant_id, question_id) do update set value = excluded.value, updated_at = excluded.updated_at;
 end $$;
@@ -294,7 +319,7 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 revoke execute on function public._is_correct(public.questions, text), public._q_score(public.questions, text, numeric),
-  public._student_questions(public.exams, text)
+  public._student_questions(public.exams, text), public._picked_ids(public.exams, text), public._p_questions(public.participants)
   from public, anon, authenticated;
 
 revoke execute on function public._own_exam(bigint), public._attempt(uuid),
@@ -364,6 +389,18 @@ begin
   return _exam_json(e);
 end $$;
 
+-- Варианты: каждому ученику p_count случайных вопросов экзамена (null — все вопросы).
+-- Менять можно только в черновике, чтобы у учеников, уже начавших работу, не поменялись вопросы.
+create or replace function public.set_exam_pick(p_exam_id bigint, p_count int) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  if e.status <> 'draft' then raise exception 'exam_locked'; end if;
+  if p_count is not null and (p_count < 1 or p_count > 500) then raise exception 'invalid_request'; end if;
+  update exams set pick_count = p_count where id = e.id returning * into e;
+  return _exam_json(e);
+end $$;
+
 create or replace function public.get_exam(p_exam_id bigint) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 declare e exams := _own_exam(p_exam_id);
@@ -373,17 +410,106 @@ begin
     'materialIds', coalesce((select jsonb_agg(material_id order by material_id) from exam_materials where exam_id = e.id), '[]'::jsonb));
 end $$;
 
+-- Рубрика вопроса из JSON: [{ "text": "...", "points": 2 }, ...] или null, если её нет.
+-- Баллы критериев — целые от 1, в сумме не больше 100 (это и есть баллы вопроса).
+create or replace function public._norm_rubric(q jsonb) returns jsonb
+language plpgsql immutable as $$
+declare r jsonb := q->'rubric';
+begin
+  if r is null or jsonb_typeof(r) = 'null' or (jsonb_typeof(r) = 'array' and jsonb_array_length(r) = 0) then return null; end if;
+  if jsonb_typeof(r) <> 'array' or jsonb_array_length(r) > 20
+     or exists (select 1 from jsonb_array_elements(r) x
+                where jsonb_typeof(x) <> 'object' or jsonb_typeof(x->'text') is distinct from 'string'
+                   or trim(x->>'text') = '' or length(x->>'text') > 500
+                   or jsonb_typeof(x->'points') is distinct from 'number'
+                   or (x->>'points')::numeric <> floor((x->>'points')::numeric) or (x->>'points')::numeric < 1)
+     or (select sum((x->>'points')::numeric) from jsonb_array_elements(r) x) > 100 then
+    raise exception 'invalid_rubric';
+  end if;
+  return (select jsonb_agg(jsonb_build_object('text', trim(x->>'text'), 'points', (x->>'points')::int) order by n)
+          from jsonb_array_elements(r) with ordinality t(x, n));
+end $$;
+
+-- Проверяет один вопрос из JSON и возвращает его вид (kind). p_type — тип экзамена
+-- (quiz | text | mixed); null — любой вид (банк вопросов).
+create or replace function public._check_question(q jsonb, p_type text) returns text
+language plpgsql immutable as $$
+declare
+  opts jsonb;
+  k text;
+begin
+  if jsonb_typeof(q) <> 'object' or coalesce(trim(q->>'text'), '') = '' then raise exception 'question_text_required'; end if;
+  if q ? 'points' and (jsonb_typeof(q->'points') is distinct from 'number'
+     or (q->>'points')::numeric <> floor((q->>'points')::numeric)
+     or (q->>'points')::numeric not between 1 and 100) then
+    raise exception 'invalid_points';
+  end if;
+  k := coalesce(q->>'kind', case when p_type = 'text' then 'text' else 'choice' end);
+  if k not in ('choice', 'truefalse', 'order', 'text', 'code')
+     or (p_type = 'quiz' and k in ('text', 'code')) or (p_type = 'text' and k not in ('text', 'code')) then
+    raise exception 'invalid_kind';
+  end if;
+  if k = 'code' then
+    if coalesce(q->>'lang', '') not in ('python', 'java') then raise exception 'invalid_code_lang'; end if;
+    if q ? 'tests' and jsonb_typeof(q->'tests') <> 'null' and (jsonb_typeof(q->'tests') <> 'array'
+       or jsonb_array_length(q->'tests') > 30
+       or exists (select 1 from jsonb_array_elements(q->'tests') x
+                  where jsonb_typeof(x) <> 'object' or jsonb_typeof(x->'output') is distinct from 'string'
+                     or (x ? 'input' and jsonb_typeof(x->'input') <> 'string')
+                     or length(x->>'input') > 10000 or length(x->>'output') > 10000)) then
+      raise exception 'invalid_tests';
+    end if;
+  end if;
+  if k in ('text', 'code') then
+    perform _norm_rubric(q);
+  else
+    opts := q->'options';
+    if opts is null or jsonb_typeof(opts) <> 'array' or jsonb_array_length(opts) < 2
+       or (k = 'truefalse' and jsonb_array_length(opts) <> 2)
+       or exists (select 1 from jsonb_array_elements(opts) o where jsonb_typeof(o) <> 'string' or trim(o #>> '{}') = '') then
+      raise exception 'quiz_needs_options';
+    end if;
+  end if;
+  if k in ('choice', 'truefalse') then
+    if jsonb_typeof(q->'correctIndex') is distinct from 'number'
+       or (q->>'correctIndex')::numeric <> floor((q->>'correctIndex')::numeric)
+       or (q->>'correctIndex')::int not between 0 and jsonb_array_length(opts) - 1 then
+      raise exception 'quiz_needs_correct';
+    end if;
+  end if;
+  return k;
+end $$;
+
+-- Поля вопроса для записи в таблицу (общие для экзамена и банка вопросов). Вопрос уже проверен _check_question.
+create or replace function public._question_fields(q jsonb, k text)
+returns table (options jsonb, correct_index int, points int, reference text, rubric jsonb, code_lang text, starter text, tests jsonb)
+language sql immutable as $$
+  select
+    case when k not in ('text', 'code') then (select jsonb_agg(trim(o) order by n) from jsonb_array_elements_text(q->'options') with ordinality t(o, n)) end,
+    case when k in ('choice', 'truefalse') then (q->>'correctIndex')::int end,
+    case when k in ('text', 'code') and _norm_rubric(q) is not null
+         then (select sum((x->>'points')::int) from jsonb_array_elements(_norm_rubric(q)) x)::int
+         else coalesce((q->>'points')::int, 1) end,
+    nullif(left(trim(coalesce(q->>'reference', '')), 5000), ''),
+    case when k in ('text', 'code') then _norm_rubric(q) end,
+    case when k = 'code' then q->>'lang' end,
+    case when k = 'code' then nullif(left(coalesce(q->>'starter', ''), 20000), '') end,
+    case when k = 'code' and jsonb_typeof(q->'tests') = 'array' and jsonb_array_length(q->'tests') > 0 then
+      (select jsonb_agg(jsonb_build_object('input', coalesce(x->>'input', ''), 'output', x->>'output') order by n)
+       from jsonb_array_elements(q->'tests') with ordinality t(x, n)) end
+$$;
+
 -- Сохраняет название и весь список вопросов черновика целиком.
 -- p_questions: [{ "kind": "choice", "text": "...", "options": ["a","b"], "correctIndex": 0, "points": 1, "reference": "..." }, ...]
 -- kind по умолчанию: choice в тесте, text в экзамене с открытыми вопросами.
 -- Вопрос с кодом: { "kind": "code", "lang": "python", "starter": "...", "tests": [{"input": "2 3", "output": "5"}], ... }
 -- (только в экзаменах с открытыми вопросами и смешанных).
+-- Открытый вопрос и код могут иметь рубрику: "rubric": [{"text": "...", "points": 2}]; тогда баллы вопроса — её сумма.
 create or replace function public.save_exam(p_exam_id bigint, p_title text, p_questions jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
   e exams := _own_exam(p_exam_id);
   q jsonb;
-  opts jsonb;
   k text;
   idx int := 0;
 begin
@@ -392,61 +518,15 @@ begin
   if p_questions is null or jsonb_typeof(p_questions) <> 'array' then raise exception 'invalid_questions'; end if;
 
   for q in select value from jsonb_array_elements(p_questions) loop
-    if jsonb_typeof(q) <> 'object' or coalesce(trim(q->>'text'), '') = '' then raise exception 'question_text_required'; end if;
-    if q ? 'points' and (jsonb_typeof(q->'points') is distinct from 'number'
-       or (q->>'points')::numeric <> floor((q->>'points')::numeric)
-       or (q->>'points')::numeric not between 1 and 100) then
-      raise exception 'invalid_points';
-    end if;
-    k := coalesce(q->>'kind', case when e.type = 'text' then 'text' else 'choice' end);
-    if k not in ('choice', 'truefalse', 'order', 'text', 'code')
-       or (e.type = 'quiz' and k in ('text', 'code')) or (e.type = 'text' and k not in ('text', 'code')) then
-      raise exception 'invalid_kind';
-    end if;
-    if k = 'code' then
-      if coalesce(q->>'lang', '') not in ('python', 'java') then raise exception 'invalid_code_lang'; end if;
-      if q ? 'tests' and jsonb_typeof(q->'tests') <> 'null' and (jsonb_typeof(q->'tests') <> 'array'
-         or jsonb_array_length(q->'tests') > 30
-         or exists (select 1 from jsonb_array_elements(q->'tests') x
-                    where jsonb_typeof(x) <> 'object' or jsonb_typeof(x->'output') is distinct from 'string'
-                       or (x ? 'input' and jsonb_typeof(x->'input') <> 'string')
-                       or length(x->>'input') > 10000 or length(x->>'output') > 10000)) then
-        raise exception 'invalid_tests';
-      end if;
-    end if;
-    if k not in ('text', 'code') then
-      opts := q->'options';
-      if opts is null or jsonb_typeof(opts) <> 'array' or jsonb_array_length(opts) < 2
-         or (k = 'truefalse' and jsonb_array_length(opts) <> 2)
-         or exists (select 1 from jsonb_array_elements(opts) o where jsonb_typeof(o) <> 'string' or trim(o #>> '{}') = '') then
-        raise exception 'quiz_needs_options';
-      end if;
-    end if;
-    if k in ('choice', 'truefalse') then
-      if jsonb_typeof(q->'correctIndex') is distinct from 'number'
-         or (q->>'correctIndex')::numeric <> floor((q->>'correctIndex')::numeric)
-         or (q->>'correctIndex')::int not between 0 and jsonb_array_length(opts) - 1 then
-        raise exception 'quiz_needs_correct';
-      end if;
-    end if;
+    perform _check_question(q, e.type);
   end loop;
 
   update exams set title = trim(p_title) where id = e.id;
   delete from questions where exam_id = e.id;
   for q in select value from jsonb_array_elements(p_questions) loop
-    k := coalesce(q->>'kind', case when e.type = 'text' then 'text' else 'choice' end);
-    insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
-    values (
-      e.id, idx, k, trim(q->>'text'),
-      case when k not in ('text', 'code') then (select jsonb_agg(trim(o) order by n) from jsonb_array_elements_text(q->'options') with ordinality t(o, n)) end,
-      case when k in ('choice', 'truefalse') then (q->>'correctIndex')::int end,
-      coalesce((q->>'points')::int, 1),
-      nullif(left(trim(coalesce(q->>'reference', '')), 5000), ''),
-      case when k = 'code' then q->>'lang' end,
-      case when k = 'code' then nullif(left(coalesce(q->>'starter', ''), 20000), '') end,
-      case when k = 'code' and jsonb_typeof(q->'tests') = 'array' and jsonb_array_length(q->'tests') > 0 then
-        (select jsonb_agg(jsonb_build_object('input', coalesce(x->>'input', ''), 'output', x->>'output') order by n)
-         from jsonb_array_elements(q->'tests') with ordinality t(x, n)) end);
+    k := _check_question(q, e.type);
+    insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests)
+    select e.id, idx, k, trim(q->>'text'), f.* from _question_fields(q, k) f;
     idx := idx + 1;
   end loop;
   return get_exam(e.id);
@@ -489,10 +569,11 @@ declare
   c exams;
 begin
   if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
-  insert into exams (teacher_id, title, type, class_name, shuffle, strict_mode, max_leaves, tools, tools_sheet)
-  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.strict_mode, e.max_leaves, e.tools, e.tools_sheet) returning * into c;
-  insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
-  select c.id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests
+  insert into exams (teacher_id, title, type, class_name, shuffle, strict_mode, max_leaves, tools, tools_sheet, pick_count)
+  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.strict_mode, e.max_leaves, e.tools, e.tools_sheet, e.pick_count)
+  returning * into c;
+  insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests)
+  select c.id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests
   from questions where exam_id = e.id order by position;
   insert into exam_materials (exam_id, material_id) select c.id, material_id from exam_materials where exam_id = e.id;
   return _exam_json(c);
@@ -515,7 +596,7 @@ begin
   return jsonb_build_object(
     'exam', _exam_json(e),
     'largePasteChars', large_paste_chars(),
-    'questionCount', jsonb_array_length(qs),
+    'questionCount', least(jsonb_array_length(qs), coalesce(e.pick_count, jsonb_array_length(qs))),
     'participants', coalesce((
       select jsonb_agg(row order by joined_at) from (
         select p.joined_at, jsonb_strip_nulls(jsonb_build_object(
@@ -540,7 +621,7 @@ begin
           'score', case when e.type <> 'text' and p.submitted_at is not null then jsonb_build_object(
             'correct', (select count(*) from questions q join answers a on a.question_id = q.id and a.participant_id = p.id
                         where q.exam_id = e.id and _is_correct(q, a.value)),
-            'total', (select count(*) from questions q where q.exam_id = e.id and q.kind not in ('text', 'code'))) end
+            'total', (select count(*) from _p_questions(p) q where q.kind not in ('text', 'code'))) end
         )) as row
         from participants p where p.exam_id = e.id
       ) s), '[]'::jsonb),
@@ -581,33 +662,58 @@ begin
               'value', a.value,
               'score', _q_score(q, a.value, g.score),
               'comment', g.comment,
+              'criteria', g.criteria,
               'source', case when q.kind not in ('text', 'code') then 'auto' else g.source end)))
-            from questions q
+            from _p_questions(p) q
             left join answers a on a.question_id = q.id and a.participant_id = p.id
             left join grades g on g.question_id = q.id and g.participant_id = p.id
-            where q.exam_id = e.id and (a.value is not null or g.score is not null)), '{}'::jsonb),
+            where a.value is not null or g.score is not null), '{}'::jsonb),
           'total', (
             select sum(_q_score(q, a.value, g.score))
-            from questions q
+            from _p_questions(p) q
             left join answers a on a.question_id = q.id and a.participant_id = p.id
-            left join grades g on g.question_id = q.id and g.participant_id = p.id
-            where q.exam_id = e.id),
-          'gradedCount', (select count(*) from questions q
+            left join grades g on g.question_id = q.id and g.participant_id = p.id),
+          'gradedCount', (select count(*) from _p_questions(p) q
                           left join grades g on g.question_id = q.id and g.participant_id = p.id
-                          where q.exam_id = e.id and (q.kind not in ('text', 'code') or g.score is not null))
+                          where q.kind not in ('text', 'code') or g.score is not null),
+          -- при вариантах (pick_count) у каждого ученика свои вопросы и свой максимум
+          'questionIds', case when e.pick_count is not null then (select jsonb_agg(q.id) from _p_questions(p) q) end,
+          'maxScore', (select coalesce(sum(q.points), 0) from _p_questions(p) q)
         ) as row
         from participants p where p.exam_id = e.id
       ) r), '[]'::jsonb));
 end $$;
 
--- Учитель ставит или исправляет оценку текстового ответа.
-create or replace function public.set_grade(p_participant_id bigint, p_question_id bigint, p_score numeric, p_comment text default null)
+-- Баллы по критериям рубрики: массив чисел той же длины, что рубрика вопроса, каждое от 0 до баллов
+-- критерия с шагом 0.5. Иначе (или если у вопроса нет рубрики) — null.
+create or replace function public._clean_criteria(q public.questions, c jsonb) returns jsonb
+language sql immutable as $$
+  select case when q.rubric is not null and jsonb_typeof(c) = 'array' and jsonb_array_length(c) = jsonb_array_length(q.rubric)
+              and not exists (select 1 from jsonb_array_elements(c) x where jsonb_typeof(x) <> 'number') then
+    (select jsonb_agg(trim_scale(greatest(0, least((r->>'points')::numeric, round((c->>(n - 1)::int)::numeric * 2) / 2))) order by n)
+     from jsonb_array_elements(q.rubric) with ordinality t(r, n)) end
+$$;
+
+-- Сумма баллов по критериям.
+create or replace function public._criteria_sum(c jsonb) returns numeric
+language sql immutable as $$ select (select sum(x::numeric) from jsonb_array_elements_text(c) x) $$;
+
+revoke execute on function public._norm_rubric(jsonb), public._check_question(jsonb, text), public._question_fields(jsonb, text),
+  public._clean_criteria(public.questions, jsonb), public._criteria_sum(jsonb)
+  from public, anon, authenticated;
+
+-- Учитель ставит или исправляет оценку текстового ответа. p_criteria — баллы по критериям рубрики
+-- (если они переданы и подходят к рубрике, оценка — их сумма).
+drop function if exists public.set_grade(bigint, bigint, numeric, text);
+create or replace function public.set_grade(p_participant_id bigint, p_question_id bigint, p_score numeric, p_comment text default null,
+  p_criteria jsonb default null)
 returns void
 language plpgsql security definer set search_path = public as $$
 declare
   p participants;
   q questions;
   e exams;
+  c jsonb;
 begin
   select * into p from participants where id = p_participant_id;
   if not found then raise exception 'not_found'; end if;
@@ -615,16 +721,19 @@ begin
   select * into q from questions where id = p_question_id and exam_id = e.id;
   if not found then raise exception 'not_found'; end if;
   if q.kind not in ('text', 'code') then raise exception 'not_gradable'; end if;
+  c := _clean_criteria(q, p_criteria);
+  if c is not null then p_score := _criteria_sum(c); end if;
   if p_score is null or p_score < 0 or p_score > q.points then raise exception 'invalid_score'; end if;
-  insert into grades (participant_id, question_id, score, comment, source, updated_at)
-  values (p.id, q.id, p_score, nullif(left(trim(coalesce(p_comment, '')), 5000), ''), 'teacher', now())
+  insert into grades (participant_id, question_id, score, comment, source, criteria, updated_at)
+  values (p.id, q.id, p_score, nullif(left(trim(coalesce(p_comment, '')), 5000), ''), 'teacher', c, now())
   on conflict (participant_id, question_id) do update
-    set score = excluded.score, comment = excluded.comment, source = 'teacher', updated_at = now();
+    set score = excluded.score, comment = excluded.comment, source = 'teacher', criteria = excluded.criteria, updated_at = now();
 end $$;
 
 -- Сохраняет оценки ИИ (вызывается из функции supabase/functions/grade).
 -- Оценки, которые учитель поставил сам или посчитали тесты, ИИ не перезаписывает.
--- p_grades: [{ "participantId": 1, "questionId": 2, "score": 3.5, "comment": "..." }, ...]
+-- p_grades: [{ "participantId": 1, "questionId": 2, "score": 3.5, "comment": "...", "criteria": [2, 1.5] }, ...]
+-- criteria (необязательно) — баллы по критериям рубрики; если они подходят, оценка — их сумма.
 create or replace function public.save_ai_grades(p_exam_id bigint, p_grades jsonb) returns int
 language plpgsql security definer set search_path = public as $$
 declare
@@ -633,17 +742,18 @@ declare
 begin
   if e.type = 'quiz' then raise exception 'not_gradable'; end if;
   if p_grades is null or jsonb_typeof(p_grades) <> 'array' then raise exception 'invalid_grades'; end if;
-  insert into grades (participant_id, question_id, score, comment, source, updated_at)
+  insert into grades (participant_id, question_id, score, comment, source, criteria, updated_at)
   select p.id, q.id,
-         trim_scale(greatest(0, least(q.points, round((g->>'score')::numeric * 2) / 2))),
+         trim_scale(greatest(0, least(q.points, coalesce(_criteria_sum(c.v), round((g->>'score')::numeric * 2) / 2)))),
          nullif(left(trim(coalesce(g->>'comment', '')), 5000), ''),
-         'ai', now()
+         'ai', c.v, now()
   from jsonb_array_elements(p_grades) g
   join participants p on p.id = (g->>'participantId')::bigint and p.exam_id = e.id
   join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind in ('text', 'code')
-  where jsonb_typeof(g->'score') = 'number'
+  cross join lateral (select _clean_criteria(q, g->'criteria') as v) c
+  where jsonb_typeof(g->'score') = 'number' and q.id in (select pq.id from _p_questions(p) pq)
   on conflict (participant_id, question_id) do update
-    set score = excluded.score, comment = excluded.comment, source = 'ai', updated_at = now()
+    set score = excluded.score, comment = excluded.comment, source = 'ai', criteria = excluded.criteria, updated_at = now()
     where grades.source = 'ai';
   get diagnostics n = row_count;
   return n;
@@ -669,7 +779,7 @@ begin
   join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind = 'code'
   where jsonb_typeof(g->'score') = 'number'
   on conflict (participant_id, question_id) do update
-    set score = excluded.score, comment = excluded.comment, source = 'tests', updated_at = now()
+    set score = excluded.score, comment = excluded.comment, source = 'tests', criteria = null, updated_at = now()
     where grades.source in ('ai', 'tests');
   get diagnostics n = row_count;
   return n;
@@ -839,14 +949,17 @@ end $$;
 
 -- Баллы каждого участника экзамена. graded — сколько вопросов уже оценено
 -- (вопросы теста — все сразу, открытые — по таблице grades).
+-- max и qn — максимум и число вопросов варианта этого ученика.
+drop function if exists public._participant_scores(bigint);
 create or replace function public._participant_scores(p_exam_id bigint)
-returns table (participant_id bigint, name text, submitted boolean, total numeric, graded bigint)
+returns table (participant_id bigint, name text, submitted boolean, total numeric, graded bigint, max numeric, qn bigint)
 language sql stable security definer set search_path = public as $$
   select p.id, p.name, p.submitted_at is not null,
     coalesce(sum(_q_score(q, a.value, g.score)), 0),
-    count(q.id) filter (where q.kind not in ('text', 'code') or g.score is not null)
+    count(q.id) filter (where q.kind not in ('text', 'code') or g.score is not null),
+    coalesce(sum(q.points), 0), count(q.id)
   from participants p
-  left join questions q on q.exam_id = p.exam_id
+  left join lateral _p_questions(p) q on true
   left join answers a on a.question_id = q.id and a.participant_id = p.id
   left join grades g on g.question_id = q.id and g.participant_id = p.id
   where p.exam_id = p_exam_id
@@ -862,9 +975,9 @@ language sql stable security definer set search_path = public as $$
     'maxScore', m.max,
     'participants', (select count(*) from s),
     'submitted', (select count(*) from s where s.submitted),
-    'graded', (select count(*) from s where s.submitted and s.graded = m.qn and m.qn > 0),
-    'avgPercent', (select round(avg(s.total * 100.0 / nullif(m.max, 0)), 1) from s
-                   where s.submitted and s.graded = m.qn and m.qn > 0))
+    'graded', (select count(*) from s where s.submitted and s.graded = s.qn and s.qn > 0),
+    'avgPercent', (select round(avg(s.total * 100.0 / nullif(s.max, 0)), 1) from s
+                   where s.submitted and s.graded = s.qn and s.qn > 0))
   from m
 $$;
 
@@ -875,9 +988,8 @@ create or replace function public._teacher_results(p_teacher uuid)
 returns table (cls text, exam_id bigint, created_at timestamptz, name text, pct numeric)
 language sql stable security definer set search_path = public as $$
   select coalesce(e.class_name, ''), e.id, e.created_at, s.name,
-    case when s.submitted and s.graded = m.qn and m.qn > 0 and m.max > 0 then s.total * 100.0 / m.max end
+    case when s.submitted and s.graded = s.qn and s.qn > 0 and s.max > 0 then s.total * 100.0 / s.max end
   from exams e
-  cross join lateral (select coalesce(sum(points), 0) as max, count(*) as qn from questions where exam_id = e.id) m
   left join lateral _participant_scores(e.id) s on true
   where e.teacher_id = p_teacher
 $$;
@@ -1167,4 +1279,84 @@ begin
     raise exception 'invalid_request';
   end if;
   return list_tool_requests(e.id);
+end $$;
+
+-- ---------- Банк вопросов ----------
+-- Вопросы учителя по темам: из них собирают новые экзамены (выбрать вручную или взять случайные).
+create table if not exists public.bank_questions (
+  id bigint generated always as identity primary key,
+  teacher_id uuid not null references auth.users(id) on delete cascade,
+  topic text,
+  kind text not null check (kind in ('choice', 'truefalse', 'order', 'text', 'code')),
+  text text not null,
+  options jsonb,
+  correct_index int,
+  points int not null default 1,
+  reference text,
+  rubric jsonb,
+  code_lang text,
+  starter text,
+  tests jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists bank_questions_teacher on public.bank_questions(teacher_id, topic);
+alter table public.bank_questions enable row level security;
+
+create or replace function public._bank_json(b public.bank_questions) returns jsonb
+language sql stable as $$
+  select jsonb_strip_nulls(jsonb_build_object(
+    'id', b.id, 'topic', b.topic, 'kind', b.kind, 'text', b.text, 'options', b.options, 'correctIndex', b.correct_index,
+    'points', b.points, 'reference', b.reference, 'rubric', b.rubric, 'lang', b.code_lang, 'starter', b.starter,
+    'tests', b.tests, 'createdAt', b.created_at))
+$$;
+revoke execute on function public._bank_json(public.bank_questions) from public, anon, authenticated;
+
+create or replace function public.list_bank() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return coalesce((select jsonb_agg(_bank_json(b) order by lower(coalesce(b.topic, '')), b.id)
+                   from bank_questions b where b.teacher_id = auth.uid()), '[]'::jsonb);
+end $$;
+
+-- Добавляет вопросы (в том же виде, что в save_exam) в банк под темой p_topic.
+-- Вопрос с тем же текстом и видом уже в банке — он обновляется, а не дублируется. Возвращает число вопросов.
+create or replace function public.add_to_bank(p_topic text, p_questions jsonb) returns int
+language plpgsql security definer set search_path = public as $$
+declare
+  q jsonb;
+  k text;
+  t text := nullif(left(trim(coalesce(p_topic, '')), 100), '');
+  n int := 0;
+  existing bigint;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if p_questions is null or jsonb_typeof(p_questions) <> 'array' or jsonb_array_length(p_questions) > 200 then
+    raise exception 'invalid_questions';
+  end if;
+  for q in select value from jsonb_array_elements(p_questions) loop
+    perform _check_question(q, null);
+  end loop;
+  for q in select value from jsonb_array_elements(p_questions) loop
+    k := _check_question(q, null);
+    select id into existing from bank_questions where teacher_id = auth.uid() and kind = k and text = trim(q->>'text') limit 1;
+    if existing is not null then
+      update bank_questions b set topic = t, options = f.options, correct_index = f.correct_index, points = f.points,
+        reference = f.reference, rubric = f.rubric, code_lang = f.code_lang, starter = f.starter, tests = f.tests
+      from _question_fields(q, k) f where b.id = existing;
+    else
+      insert into bank_questions (teacher_id, topic, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests)
+      select auth.uid(), t, k, trim(q->>'text'), f.* from _question_fields(q, k) f;
+    end if;
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+
+create or replace function public.delete_bank_question(p_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  delete from bank_questions where id = p_id and teacher_id = auth.uid();
+  if not found then raise exception 'not_found'; end if;
 end $$;

@@ -8,6 +8,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
   <script src="code-runner.js"></script>
+  <script src="calc-engine.js"></script><script src="exam-tools.js"></script>
+  <script src="tool-graph.js"></script><script src="periodic-data.js"></script><script src="tool-periodic.js"></script>
 </head>
 <body>
   <header><div class="wrap"><span class="brand" data-i18n="app_name"></span><span class="muted" id="who"></span></div></header>
@@ -289,6 +291,7 @@
       document.getElementById('attempt').hidden = true;
       document.getElementById('join').hidden = true;
       document.getElementById('done').hidden = false;
+      ExamTools.unmount();
     }
 
     async function loadAttempt() {
@@ -306,6 +309,7 @@
         }
       }
       renderQuestions(data);
+      ExamTools.mount(data.exam.tools, { sheet: data.exam.toolsSheet, storeKey });
       document.getElementById('attempt').hidden = false;
       setConn('saved');
       startTracking();

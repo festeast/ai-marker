@@ -168,3 +168,44 @@ details.student > summary h2 { margin: 0; font-size: 18px; }
 details.student > summary h2::before { content: '▸'; display: inline-block; width: 1em; color: var(--muted, #888); }
 details.student[open] > summary h2::before { transform: rotate(90deg); }
 details.student[open] > summary { margin-bottom: 8px; }
+
+/* Инструменты на экзамене: кнопки внизу экрана и панель поверх страницы */
+body.has-tools main.wrap { padding-bottom: 96px; }
+.tools-dock { position: fixed; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 30; display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: calc(100vw - 16px); }
+.tools-dock button { padding: 6px 10px; font-size: 14px; }
+.tools-dock button.active { background: var(--accent); color: var(--accent-ink); }
+.tool-panel { position: fixed; right: 12px; bottom: 76px; z-index: 31; width: min(420px, calc(100vw - 16px)); max-height: calc(100vh - 100px); overflow: auto;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+.tool-panel.wide { width: min(860px, calc(100vw - 16px)); }
+@media (max-width: 600px) { .tool-panel { right: 8px; left: 8px; width: auto; } .tool-panel.wide { width: auto; } }
+.tool-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tool-head h2 { margin: 0; font-size: 17px; }
+.tool-sheet { white-space: pre-wrap; word-break: break-word; font-size: 15px; }
+.small { font-size: 13px; }
+.calc-input { font: 18px ui-monospace, monospace; margin-top: 8px; }
+.calc-result { font: 600 22px ui-monospace, monospace; text-align: right; padding: 4px 2px 8px; min-height: 1.5em; word-break: break-all; }
+.calc-pad { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+.calc-key { padding: 8px 0; font-size: 15px; background: #f1f3f7; color: var(--text); border-color: var(--line); }
+.calc-key.d { background: #fff; font-weight: 600; }
+.calc-key.fn { color: var(--bad); }
+.calc-key.eq { grid-column: span 2; background: var(--accent); color: var(--accent-ink); }
+.calc-history { list-style: none; padding: 0; margin: 8px 0 0; font: 14px ui-monospace, monospace; max-height: 140px; overflow: auto; }
+.calc-history li { padding: 3px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.graph-fn { display: flex; gap: 8px; align-items: center; margin: 4px 0; color: var(--text); font: 15px ui-monospace, monospace; }
+.graph-fn input.bad { border-color: var(--bad); }
+.graph-canvas { display: block; width: 100%; height: 320px; border: 1px solid var(--line); border-radius: 8px; margin-top: 8px; touch-action: none; cursor: crosshair; }
+.graph-readout { min-height: 1.5em; margin-top: 4px; font-family: ui-monospace, monospace; }
+.pt-grid { display: grid; grid-template-columns: repeat(18, minmax(40px, 1fr)); gap: 2px; min-width: 760px; }
+.pt-el { display: flex; flex-direction: column; align-items: center; padding: 2px 0; border-radius: 4px; border: 1px solid rgba(0,0,0,.08); color: var(--text); line-height: 1.1; }
+.pt-z { font-size: 9px; align-self: flex-start; padding-left: 3px; }
+.pt-sym { font-weight: 700; font-size: 15px; }
+.pt-m { font-size: 8px; color: #4b5563; }
+.pt-gap { font-size: 9px; color: var(--muted); display: flex; align-items: center; justify-content: center; }
+.pt-info { min-height: 3.6em; margin-bottom: 8px; font-size: 14px; }
+.pt-big { font-size: 22px; }
+.pt-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.pt-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 4px; vertical-align: -2px; }
+.pt-alkali { background: #ffd8a8; } .pt-alkaline { background: #ffe8a3; } .pt-transition { background: #f3d9e8; }
+.pt-post { background: #d3e4cd; } .pt-metalloid { background: #c7ecee; } .pt-nonmetal { background: #d0ebff; }
+.pt-halogen { background: #e5dbff; } .pt-noble { background: #fcc2d7; } .pt-lanthanide { background: #e9ecc0; } .pt-actinide { background: #f8e1c4; }

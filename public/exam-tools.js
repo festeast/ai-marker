@@ -150,5 +150,9 @@ const ExamTools = (() => {
   }
 
   const BUILD = { calculator, code, sheet };
-  return { mount, BUILD, store: () => store };
+  function unmount() {
+    if (panel) { panel.remove(); dock.remove(); document.body.classList.remove('has-tools'); panel = null; }
+  }
+
+  return { mount, unmount, BUILD, store: () => store };
 })();

@@ -168,3 +168,12 @@ details.student > summary h2 { margin: 0; font-size: 18px; }
 details.student > summary h2::before { content: '▸'; display: inline-block; width: 1em; color: var(--muted, #888); }
 details.student[open] > summary h2::before { transform: rotate(90deg); }
 details.student[open] > summary { margin-bottom: 8px; }
+
+/* Строгий режим экзамена */
+.strict-gate { text-align: center; }
+.strict-gate button { margin-top: 8px; }
+body.strict #questions { -webkit-user-select: none; user-select: none; }
+body.strict #questions textarea { -webkit-user-select: text; user-select: text; }
+.strict-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20; background: #2b2f36; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: calc(100% - 32px); }
+.badge.locked { background: #fde2e2; color: var(--bad); }
+@media print { body.strict main { display: none; } }

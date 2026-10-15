@@ -17,6 +17,7 @@
         <h1 id="title" style="margin:0"></h1>
         <span class="badge" id="status"></span>
       </div>
+      <p class="muted" id="strict-info" hidden></p>
       <div id="share" hidden>
         <label data-i18n="code"></label>
         <div class="row"><span class="code-box" id="code"></span><button class="secondary small" id="copy-code" data-i18n="copy"></button></div>
@@ -53,17 +54,20 @@
     }
 
     function isFlagged(e) {
-      return e.type === 'leave' || (e.type === 'paste' && e.detail && e.detail.large);
+      return e.type === 'leave' || e.type === 'lock' || (e.type === 'paste' && e.detail && (e.detail.large || e.detail.blocked));
     }
 
     function eventText(e) {
       const d = e.detail || {};
       switch (e.type) {
         case 'join': return t('ev_join');
-        case 'leave': return d.reason === 'close' ? t('ev_leave_close') : t('ev_leave');
+        case 'leave': return d.reason === 'close' ? t('ev_leave_close') : d.reason === 'fullscreen' ? t('ev_leave_fullscreen') : t('ev_leave');
         case 'return': return `${t('ev_return')} ${fmtDuration(d.awayMs || 0)}`;
-        case 'paste': return `${t('ev_paste')}: ${d.length} ${t('chars')}${d.large ? ' — ' + t('large') : ''}`;
+        case 'paste': if (d.blocked) return `${t('ev_paste_blocked')}: ${d.length} ${t('chars')}`;
+          return `${t('ev_paste')}: ${d.length} ${t('chars')}${d.large ? ' — ' + t('large') : ''}`;
         case 'submit': return t('ev_submit');
+        case 'lock': return t('ev_lock');
+        case 'unlock': return t('ev_unlock');
         default: return e.type;
       }
     }
@@ -85,7 +89,8 @@
         .concat(isQuiz ? ['col_score'] : []).map((k) => el('th', {}, t(k))));
       const rows = data.participants.map((p) => el('tr', { class: p.leaveCount || p.largePasteCount ? 'flagged' : '' },
         el('td', {}, el('b', {}, p.name), el('br'), el('span', { class: 'muted' }, fmtTime(p.joinedAt))),
-        el('td', {}, el('span', { class: 'badge ' + p.status }, t('st_' + p.status))),
+        el('td', {}, el('span', { class: 'badge ' + p.status }, t('st_' + p.status)),
+          p.status === 'locked' ? el('button', { class: 'secondary small', style: 'margin-left:6px', onclick: (e) => unlock(p, e.target) }, t('unlock')) : null),
         el('td', {}, p.leaveCount ? el('span', { class: 'badge flag' }, String(p.leaveCount)) : '0'),
         el('td', {}, p.awayMs ? fmtDuration(p.awayMs) : '—'),
         el('td', {}, p.largePasteCount ? el('span', { class: 'badge flag' }, String(p.largePasteCount)) : '0'),
@@ -93,6 +98,12 @@
         isQuiz ? el('td', {}, p.score ? `${p.score.correct} / ${p.score.total}` : '—') : null,
       ));
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
+    }
+
+    async function unlock(p, btn) {
+      btn.disabled = true;
+      try { await rpc('unlock_participant', { p_participant_id: p.id }); }
+      catch (err) { btn.disabled = false; document.getElementById('err').textContent = err.message; }
     }
 
     async function poll() {
@@ -103,6 +114,9 @@
         const status = document.getElementById('status');
         status.textContent = t('status_' + x.status); status.className = 'badge ' + x.status;
         if (x.status === 'draft') { location.href = 'edit.html?id=' + id; return; }
+        const info = document.getElementById('strict-info');
+        info.hidden = !x.strictMode;
+        info.textContent = x.strictMode ? t('strict_on') + (x.maxLeaves ? ': ' + t('strict_lock_after').replace('{n}', x.maxLeaves) : '') : '';
         document.getElementById('share').hidden = x.status !== 'published';
         document.getElementById('close').hidden = x.status !== 'published';
         document.getElementById('code').textContent = x.code;

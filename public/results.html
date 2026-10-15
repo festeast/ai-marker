@@ -8,6 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
   <script src="teacher-common.js"></script><script src="code-runner.js"></script>
+  <script src="xlsx-write.js"></script><script src="results-tools.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -15,6 +16,9 @@
     <div class="card">
       <h1 id="title" style="margin:0 0 12px"></h1>
       <div id="summary"></div>
+      <div class="row" id="export-box" hidden style="margin-top:12px">
+        <button class="secondary" id="export-xlsx" data-i18n="xl_export"></button><span id="export-msg" class="muted"></span>
+      </div>
       <div id="ai-box" hidden style="margin-top:16px">
         <div class="row">
           <label class="row" style="margin:0"><span data-i18n="ai_model"></span>
@@ -45,6 +49,14 @@
       <h2 data-i18n="class_analysis"></h2>
       <div id="analysis"></div>
     </div>
+    <details class="card" id="group-card" hidden>
+      <summary><b data-i18n="group_title"></b></summary>
+      <div id="grouping"></div>
+    </details>
+    <details class="card" id="copy-card" hidden>
+      <summary><b data-i18n="copy_title"></b> <span class="muted" id="copy-summary"></span></summary>
+      <div id="copy"></div>
+    </details>
     <details class="card" id="meta-card">
       <summary><b data-i18n="class_and_materials"></b> <span class="muted" id="meta-summary"></span></summary>
       <div id="meta"></div>
@@ -73,13 +85,12 @@
     function renderSummary() {
       const box = document.getElementById('summary');
       if (!data.participants.length) { box.replaceChildren(el('p', { class: 'muted' }, t('no_results'))); return; }
-      const qn = data.questions.length;
       const head = el('tr', {}, [t('col_student'), t('col_status'), t('total'), t('graded')].map((h) => el('th', {}, h)));
       const rows = data.participants.map((p) => el('tr', {},
         el('td', {}, el('a', { href: '#p' + p.id }, p.name)),
         el('td', {}, p.submittedAt ? el('span', { class: 'badge submitted' }, t('st_submitted')) : el('span', { class: 'muted' }, t('not_submitted'))),
-        el('td', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`),
-        el('td', {}, `${p.gradedCount} / ${qn}`),
+        el('td', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${studentMax(data, p)}`),
+        el('td', {}, `${p.gradedCount} / ${studentQuestions(data, p).length}`),
       ));
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
     }
@@ -87,15 +98,14 @@
     // Анализ класса по сданным и полностью оценённым работам.
     function renderAnalysis() {
       const card = document.getElementById('analysis-card');
-      const qn = data.questions.length;
       const submitted = data.participants.filter((p) => p.submittedAt);
-      const graded = submitted.filter((p) => p.gradedCount >= qn && data.maxScore > 0);
+      const graded = submitted.filter((p) => p.gradedCount >= studentQuestions(data, p).length && studentMax(data, p) > 0);
       card.hidden = !submitted.length;
       if (!submitted.length) return;
       const box = document.getElementById('analysis');
       if (!graded.length) { box.replaceChildren(el('p', { class: 'muted' }, t('analysis_wait'))); return; }
 
-      const pcts = graded.map((p) => ({ name: p.name, id: p.id, pct: Number(p.total) * 100 / data.maxScore })).sort((a, b) => b.pct - a.pct);
+      const pcts = graded.map((p) => ({ name: p.name, id: p.id, pct: Number(p.total) * 100 / studentMax(data, p) })).sort((a, b) => b.pct - a.pct);
       const avg = pcts.reduce((s, x) => s + x.pct, 0) / pcts.length;
       const mid = pcts.length % 2 ? pcts[(pcts.length - 1) / 2].pct : (pcts[pcts.length / 2 - 1].pct + pcts[pcts.length / 2].pct) / 2;
       const stat = (num, label, cls) => el('div', { class: 'stat' }, el('div', { class: 'num ' + (cls || '') }, num), el('div', { class: 'muted' }, label));
@@ -108,7 +118,8 @@
 
       // Средний процент по каждому вопросу: сначала самые трудные.
       const perQ = data.questions.map((q, i) => {
-        const scores = graded.map((p) => p.answers[q.id] && p.answers[q.id].score).filter((v) => v !== undefined && v !== null);
+        const scores = graded.filter((p) => !p.questionIds || p.questionIds.includes(q.id))
+          .map((p) => p.answers[q.id] && p.answers[q.id].score).filter((v) => v !== undefined && v !== null);
         const pct = scores.length ? scores.reduce((s, v) => s + Number(v), 0) * 100 / (scores.length * q.points) : null;
         return { i, q, pct };
       }).sort((a, b) => (a.pct ?? 101) - (b.pct ?? 101));
@@ -136,28 +147,31 @@
     }
 
     function gradeForm(p, q, a) {
-      const score = el('input', { type: 'number', min: 0, max: q.points, step: 0.5, style: 'width:90px' });
-      if (a.score !== undefined) score.value = a.score;
+      const inputs = scoreInputs(q, a);
       const comment = el('input', { type: 'text', placeholder: t('comment_placeholder') });
       comment.value = a.comment || '';
       const msg = el('span', { class: 'muted' }, sourceLabel(a.source));
       const save = el('button', { class: 'small', onclick: async () => {
         msg.className = 'muted'; msg.textContent = '';
         try {
-          if (score.value === '') throw appError('invalid_score');
-          await rpc('set_grade', { p_participant_id: p.id, p_question_id: q.id, p_score: Number(score.value), p_comment: comment.value });
+          const v = inputs.value();
+          if (v.score === null || Number.isNaN(v.score)) throw appError('invalid_score');
+          await rpc('set_grade', { p_participant_id: p.id, p_question_id: q.id, p_score: v.score, p_comment: comment.value, p_criteria: v.criteria });
           await load();
         } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
       } }, t('save'));
       return el('div', {},
-        el('div', { class: 'row', style: 'margin-top:8px' }, el('span', {}, t('score') + ':'), score, el('span', { class: 'muted' }, `${t('of')} ${q.points}`), save, msg),
+        q.rubric && q.rubric.length
+          ? [el('div', { style: 'margin-top:8px' }, inputs.node), el('div', { class: 'row', style: 'margin-top:8px' }, save, msg)]
+          : el('div', { class: 'row', style: 'margin-top:8px' }, inputs.node, save, msg),
         el('div', { style: 'margin-top:6px' }, comment));
     }
 
     function renderStudents() {
       const hasText = data.questions.some((q) => ['text', 'code'].includes(q.kind || 'text'));
       document.getElementById('students').replaceChildren(...data.participants.map((p) => {
-        const items = data.questions.map((q, i) => {
+        const items = studentQuestions(data, p).map((q) => {
+          const i = data.questions.indexOf(q);
           const a = p.answers[q.id] || {};
           const kind = q.kind || (data.exam.type === 'quiz' ? 'choice' : 'text');
           const parts = [el('div', { class: 'row spread' },
@@ -195,8 +209,8 @@
             el('h2', {}, p.name),
             el('span', { class: 'row' },
               p.submittedAt ? null : el('span', { class: 'muted' }, t('not_submitted')),
-              el('span', { class: 'muted' }, `${t('graded')}: ${p.gradedCount} / ${data.questions.length}`),
-              aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${data.maxScore}`))),
+              el('span', { class: 'muted' }, `${t('graded')}: ${p.gradedCount} / ${studentQuestions(data, p).length}`),
+              aiOne, el('span', {}, el('b', {}, fmtScore(p.total)), ` ${t('of')} ${studentMax(data, p)}`))),
           items, p.submittedAt ? feedbackForm(p) : null,
           el('div', { class: 'row', style: 'margin-top:12px; justify-content:flex-end' },
             el('button', { class: 'danger small', onclick: (e) => deleteStudent(p, e.target) }, t('delete_student'))));
@@ -248,7 +262,7 @@
 
     // Отзыв с шапкой: имя, экзамен, баллы — для копирования и печати.
     function feedbackSheet(p, text) {
-      const score = t('fb_score_line').replace('{score}', fmtScore(p.total)).replace('{max}', data.maxScore);
+      const score = t('fb_score_line').replace('{score}', fmtScore(p.total)).replace('{max}', studentMax(data, p));
       return { head: `${p.name} — ${data.exam.title}`, score, text };
     }
 
@@ -380,7 +394,7 @@
       const qs = data.questions.filter((q) => q.kind === 'code' && q.tests && q.tests.length);
       const jobs = [];
       for (const p of data.participants.filter((x) => x.submittedAt)) {
-        for (const q of qs) {
+        for (const q of qs.filter((x) => !p.questionIds || p.questionIds.includes(x.id))) {
           const a = p.answers[q.id] || {};
           if (a.source !== 'teacher') jobs.push({ p, q, a });
         }
@@ -476,6 +490,14 @@
         .map(([pid, f]) => [pid, f.box.value]));
       fbForms.clear();
       renderStudents();
+      renderGrouping(document.getElementById('grouping'), data, groupState, () => load().catch(showPageError));
+      const anyDone = data.participants.some((p) => p.submittedAt);
+      document.getElementById('copy-card').hidden = !anyDone;
+      if (anyDone) {
+        const pairs = renderSuspicious(document.getElementById('copy'), data);
+        document.getElementById('copy-summary').textContent = pairs.length ? t('copy_found').replace('{n}', pairs.length) : '';
+      }
+      document.getElementById('export-box').hidden = !data.participants.length;
       for (const [pid, text] of drafts) {
         const f = fbForms.get(pid);
         if (f) { f.box.value = text; f.setMsg('muted', t('fb_unsaved')); }
@@ -487,6 +509,14 @@
       document.getElementById('ai-grade-box').hidden = !data.questions.some((q) => q.kind === 'text' || q.kind === 'code');
       document.getElementById('tests-box').hidden = !data.questions.some((q) => q.kind === 'code' && q.tests && q.tests.length) || !anySubmitted;
     }
+
+    const groupState = {};
+    document.getElementById('export-xlsx').addEventListener('click', async (e) => {
+      const msg = document.getElementById('export-msg');
+      e.target.disabled = true; msg.className = 'muted'; msg.textContent = '';
+      try { await exportResultsXlsx(data); } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
+      finally { e.target.disabled = false; }
+    });
 
     requireLogin().then(load).then(async () => {
       if (/^#p\d+$/.test(location.hash)) openCard(location.hash.slice(2));

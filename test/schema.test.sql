@@ -486,3 +486,99 @@ select log_event(:'ts', 'return', '{"awayMs":5000}');
 select log_event(:'ts', 'leave', '{"reason":"blur"}');
 select pg_temp.check(not (get_attempt(:'ts')->>'locked')::boolean, 'один уход после разблокировки — ещё не блокировка');
 select submit_attempt(:'ts', '{"0":"1"}');
+
+-- ---------- рубрика: критерии оценки ----------
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (create_exam('Рубрика', 'text')->>'id')::bigint as rub_id \gset
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Рубрика', '[{"kind":"text","text":"Эссе","rubric":[{"text":"","points":2}]}]') $$, :rub_id), 'invalid_rubric');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Рубрика', '[{"kind":"text","text":"Эссе","rubric":[{"text":"Мысль","points":0.5}]}]') $$, :rub_id), 'invalid_rubric');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Рубрика', '[{"kind":"text","text":"Эссе","rubric":[{"text":"Мысль","points":60},{"text":"Пример","points":50}]}]') $$, :rub_id), 'invalid_rubric');
+select save_exam(:rub_id, 'Рубрика', '[{"kind":"text","text":"Эссе","points":1,"rubric":[{"text":" Главная мысль ","points":2},{"text":"Пример","points":1}]},{"kind":"text","text":"Без рубрики","rubric":[]}]') as rub \gset
+select pg_temp.check((:'rub'::jsonb->'questions'->0->>'points')::int = 3, 'баллы вопроса = сумма критериев');
+select pg_temp.check(:'rub'::jsonb->'questions'->0->'rubric'->0->>'text' = 'Главная мысль', 'текст критерия обрезан');
+select pg_temp.check(not (:'rub'::jsonb->'questions'->1 ? 'rubric'), 'пустая рубрика не сохраняется');
+select (:'rub'::jsonb->'questions'->0->>'id')::bigint as rq1 \gset
+select publish_exam(:rub_id)->>'code' as rub_code \gset
+select pg_temp.check(copy_exam(:rub_id, 'Рубрика 2') is not null, 'копия');
+select pg_temp.check((select get_exam((e->>'id')::bigint)->'questions'->0->'rubric' from jsonb_array_elements(list_exams()) e where e->>'title' = 'Рубрика 2') is not null, 'рубрика копируется');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select join_exam(:'rub_code', 'Рустем') as rtoken \gset
+select pg_temp.check(not (get_attempt(:'rtoken')->'questions'->0 ? 'rubric'), 'ученик не видит рубрику');
+select submit_attempt(:'rtoken', jsonb_build_object(:'rq1', 'Моё эссе'));
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (exam_results(:rub_id)->'participants'->0->>'id')::bigint as rpid \gset
+-- ИИ: баллы по критериям обрезаются по максимуму критерия, оценка — их сумма
+select save_ai_grades(:rub_id, jsonb_build_array(jsonb_build_object('participantId', :rpid, 'questionId', :rq1, 'score', 1, 'comment', 'ok', 'criteria', '[5, 0.7]'::jsonb)));
+select exam_results(:rub_id)->'participants'->0->'answers'->(:'rq1') as ra \gset
+select pg_temp.check((:'ra'::jsonb->>'score')::numeric = 2.5 and :'ra'::jsonb->'criteria' = '[2, 0.5]'::jsonb, 'ИИ: критерии 2 + 0.5');
+-- критерии неподходящей длины — берётся просто балл
+select save_ai_grades(:rub_id, jsonb_build_array(jsonb_build_object('participantId', :rpid, 'questionId', :rq1, 'score', 1, 'comment', 'ok', 'criteria', '[1]'::jsonb)));
+select exam_results(:rub_id)->'participants'->0->'answers'->(:'rq1') as ra \gset
+select pg_temp.check((:'ra'::jsonb->>'score')::numeric = 1 and not (:'ra'::jsonb ? 'criteria'), 'неподходящие критерии отброшены');
+select set_grade(:rpid, :rq1, 0, 'учитель', '[2, 1]'::jsonb);
+select exam_results(:rub_id)->'participants'->0->'answers'->(:'rq1') as ra \gset
+select pg_temp.check((:'ra'::jsonb->>'score')::numeric = 3 and :'ra'::jsonb->>'source' = 'teacher', 'учитель: оценка по критериям');
+select set_grade(:rpid, :rq1, 1.5, 'без критериев');
+select exam_results(:rub_id)->'participants'->0->'answers'->(:'rq1') as ra \gset
+select pg_temp.check((:'ra'::jsonb->>'score')::numeric = 1.5 and not (:'ra'::jsonb ? 'criteria'), 'учитель: общий балл без критериев');
+
+-- ---------- варианты: каждому ученику свои случайные вопросы ----------
+select (create_exam('Варианты', 'quiz')->>'id')::bigint as var_id \gset
+select save_exam(:var_id, 'Варианты', (select jsonb_agg(jsonb_build_object('text', 'В' || i, 'options', '["a","b"]'::jsonb, 'correctIndex', 0, 'points', 1))
+  from generate_series(1, 6) i));
+select pg_temp.expect_error(format('select set_exam_pick(%s, 0)', :var_id), 'invalid_request');
+select pg_temp.check((set_exam_pick(:var_id, 3)->>'pickCount')::int = 3, 'вариант из 3 вопросов');
+select publish_exam(:var_id)->>'code' as var_code \gset
+select pg_temp.expect_error(format('select set_exam_pick(%s, 2)', :var_id), 'exam_locked');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select join_exam(:'var_code', 'В1') as vt1 \gset
+select join_exam(:'var_code', 'В2') as vt2 \gset
+select join_exam(:'var_code', 'В3') as vt3 \gset
+select pg_temp.check(jsonb_array_length(get_attempt(:'vt1')->'questions') = 3, 'ученику 3 вопроса');
+select pg_temp.check(get_attempt(:'vt1')->'questions' = get_attempt(:'vt1')->'questions', 'вариант не меняется');
+select pg_temp.check(
+  (select count(distinct (select string_agg(q->>'id', ',' order by q->>'id') from jsonb_array_elements(get_attempt(t)->'questions') q))
+   from unnest(array[:'vt1', :'vt2', :'vt3']::uuid[]) t) > 1, 'варианты у учеников разные');
+-- ответ на чужой вопрос не сохраняется; ответим верно на все вопросы своего варианта
+select submit_attempt(:'vt1', (select jsonb_object_agg(q->>'id', '0') from jsonb_array_elements(get_attempt(:'vt1')->'questions') q)
+  || (select jsonb_object_agg(q.id::text, '0') from (select (x->>'id')::bigint id from jsonb_array_elements(get_attempt(:'vt2')->'questions') x) q
+      where q.id not in (select (y->>'id')::bigint from jsonb_array_elements(get_attempt(:'vt1')->'questions') y)));
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select p as vp from jsonb_array_elements(exam_results(:var_id)->'participants') p where p->>'name' = 'В1' \gset
+select pg_temp.check((:'vp'::jsonb->>'maxScore')::int = 3 and (:'vp'::jsonb->>'total')::numeric = 3
+  and (:'vp'::jsonb->>'gradedCount')::int = 3 and jsonb_array_length(:'vp'::jsonb->'questionIds') = 3
+  and (select count(*) from jsonb_object_keys(:'vp'::jsonb->'answers')) = 3, 'результат по своему варианту: 3 из 3');
+select pg_temp.check((exam_monitor(:var_id, 0)->>'questionCount')::int = 3, 'в мониторинге 3 вопроса');
+select pg_temp.check((select (e->>'avgPercent')::numeric from jsonb_array_elements(teacher_stats()->'exams') e where (e->>'id')::bigint = :var_id) = 100,
+  'профиль: 100% по своему варианту');
+
+-- ---------- банк вопросов ----------
+select pg_temp.expect_error($$ select add_to_bank('Т', '[{"text":"","options":["a","b"],"correctIndex":0}]') $$, 'question_text_required');
+select pg_temp.check(add_to_bank(' Дроби ', '[{"kind":"choice","text":"1/2 + 1/2","options":["1","2"],"correctIndex":0},{"kind":"text","text":"Что такое дробь?","rubric":[{"text":"Определение","points":2}]}]') = 2, 'в банк добавлено 2');
+select pg_temp.check(add_to_bank('Дроби', '[{"kind":"choice","text":"1/2 + 1/2","options":["1","3"],"correctIndex":1}]') = 1, 'повтор обновляет');
+select pg_temp.check(jsonb_array_length(list_bank()) = 2, 'дубликатов нет');
+select pg_temp.check((select b->'options'->>1 from jsonb_array_elements(list_bank()) b where b->>'kind' = 'choice') = '3', 'вопрос обновлён');
+select pg_temp.check((select (b->>'points')::int from jsonb_array_elements(list_bank()) b where b->>'kind' = 'text') = 2, 'баллы по рубрике');
+select pg_temp.check((select bool_and(b->>'topic' = 'Дроби') from jsonb_array_elements(list_bank()) b), 'тема');
+select (list_bank()->0->>'id')::bigint as bq1 \gset
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.check(list_bank() = '[]'::jsonb, 'чужой банк не виден');
+select pg_temp.expect_error(format('select delete_bank_question(%s)', :bq1), 'not_found');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select delete_bank_question(:bq1);
+select pg_temp.check(jsonb_array_length(list_bank()) = 1, 'удалён');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error($$ select list_bank() $$, 'unauthorized');
+reset role;

@@ -225,6 +225,10 @@ select save_exam(:mix_id, 'Смешанный', '[
   {"kind":"text","text":"Что такое фотосинтез?","reference":"свет, хлорофилл","points":3}]'::jsonb) as mix \gset
 select pg_temp.check((select string_agg(q->>'kind', ',') from jsonb_array_elements((:'mix'::jsonb)->'questions') q) = 'choice,truefalse,order,text', 'виды вопросов сохранены');
 select pg_temp.check((:'mix'::jsonb)->'questions'->2->'options' = '["1","5","10","50"]', 'порядок вариантов сохранён');
+select pg_temp.check(get_exam(:mix_id)->'tools' = '[]'::jsonb, 'инструментов по умолчанию нет');
+select pg_temp.expect_error(format($$ select set_exam_tools(%s, array['calculator', 'phone']) $$, :mix_id), 'invalid_tool');
+select pg_temp.check(set_exam_tools(:mix_id, array['periodic', 'calculator', 'sheet', 'calculator'], 'pV = nRT')->'tools'
+  = '["calculator", "periodic", "sheet"]'::jsonb, 'инструменты сохранены без повторов');
 select publish_exam(:mix_id)->>'code' as mix_code \gset
 select (q->>'id')::bigint as q_choice from jsonb_array_elements((:'mix'::jsonb)->'questions') q where q->>'kind' = 'choice' \gset
 select (q->>'id')::bigint as q_tf from jsonb_array_elements((:'mix'::jsonb)->'questions') q where q->>'kind' = 'truefalse' \gset
@@ -237,12 +241,48 @@ select join_exam(:'mix_code', 'Айдана') as t1 \gset
 select join_exam(:'mix_code', 'Бауыржан') as t2 \gset
 select get_attempt(:'t1') as a1 \gset
 select pg_temp.check(jsonb_array_length((:'a1'::jsonb)->'questions') = 4, 'ученик видит 4 вопроса');
+select pg_temp.check((:'a1'::jsonb)->'exam'->'tools' = '["calculator", "periodic", "sheet"]'::jsonb
+  and (:'a1'::jsonb)->'exam'->>'toolsSheet' = 'pV = nRT', 'ученик получает разрешённые инструменты и справочный лист');
 select pg_temp.check(not exists (select 1 from jsonb_array_elements((:'a1'::jsonb)->'questions') q where q ? 'correctIndex' or q ? 'reference'), 'ответы скрыты');
 select pg_temp.check((select (select string_agg(o->>'i', ',') from jsonb_array_elements(q->'options') o) <> '0,1,2,3'
   from jsonb_array_elements((:'a1'::jsonb)->'questions') q where q->>'kind' = 'order'), 'порядок перемешан');
 select pg_temp.check((select string_agg(o->>'text', ',' order by (o->>'i')::int) from jsonb_array_elements((:'a1'::jsonb)->'questions') q,
   jsonb_array_elements(q->'options') o where q->>'kind' = 'order') = '1,5,10,50', 'варианты помечены номерами учителя');
 select pg_temp.check(get_attempt(:'t1')->'questions' = (:'a1'::jsonb)->'questions', 'перемешивание не меняется при перезагрузке');
+-- запросы инструментов
+select pg_temp.expect_error(format($$ select request_tool(%L, 'phone') $$, :'t1'), 'invalid_tool');
+select pg_temp.check(request_tool(:'t1', 'calculator')->'requests' = '[]'::jsonb, 'уже доступный инструмент не запрашивается');
+select pg_temp.check(request_tool(:'t1', 'code')->'requests' = '[{"tool": "code", "status": "pending"}]'::jsonb, 'запрос отправлен');
+select request_tool(:'t2', 'code');
+reset role;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+set role authenticated;
+select pg_temp.expect_error(format('select list_tool_requests(%s)', :mix_id), 'not_found');
+reset role;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+set role authenticated;
+select list_tool_requests(:mix_id) as tr \gset
+select pg_temp.check(jsonb_array_length((:'tr'::jsonb)->'requests') = 2, 'учитель видит два запроса');
+select (r->>'participantId')::bigint as tr_p1 from jsonb_array_elements((:'tr'::jsonb)->'requests') r where r->>'name' = 'Айдана' \gset
+select decide_tool_requests(:mix_id, 'code', true, 'one', :tr_p1);
+select pg_temp.check((select r->>'status' from jsonb_array_elements(decide_tool_requests(:mix_id, 'code', false, 'requested')->'requests') r
+  where r->>'name' = 'Бауыржан') = 'denied', 'отказ всем, кто ждёт');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.check(attempt_tools(:'t1')->'tools' ? 'code', 'инструмент выдан одному ученику');
+select pg_temp.check(get_attempt(:'t1')->'exam'->'tools' ? 'code', 'выданный инструмент виден при загрузке');
+select pg_temp.check(not (attempt_tools(:'t2')->'tools' ? 'code'), 'другому ученику не выдан');
+select pg_temp.check(request_tool(:'t2', 'code')->'requests'->0->>'status' = 'pending', 'после отказа можно попросить снова');
+reset role;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+set role authenticated;
+select pg_temp.check(decide_tool_requests(:mix_id, 'code', true, 'everyone')->'tools' ? 'code', 'инструмент включён для всего экзамена');
+select set_exam_tools(:mix_id, array['calculator', 'periodic', 'sheet'], 'pV = nRT');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.check(attempt_tools(:'t2')->'requests'->0->>'status' = 'granted', 'ожидающий запрос выполнен');
 select submit_attempt(:'t1', jsonb_build_object(:'q_choice', '0', :'q_tf', '0', :'q_order', '0,1,2,3', :'q_text', 'Свет и хлорофилл'));
 select submit_attempt(:'t2', jsonb_build_object(:'q_choice', '1', :'q_tf', '1', :'q_order', '3,2,1,0'));
 
@@ -351,6 +391,9 @@ select update_exam_meta(:chem_id, '9Б', array[:mat2]::bigint[]);
 select (copy_exam(:chem_id, 'Химия 2')->>'id')::bigint as chem2 \gset
 select pg_temp.check(get_exam(:chem2)->'materialIds' = jsonb_build_array(:mat2), 'материалы скопированы');
 select pg_temp.check(get_exam(:chem2)->>'className' is not distinct from get_exam(:chem_id)->>'className', 'класс скопирован');
+select (copy_exam(:mix_id, 'Смешанный 2')->>'id')::bigint as mix2 \gset
+select pg_temp.check(get_exam(:mix2)->'tools' = '["calculator", "periodic", "sheet"]'::jsonb and get_exam(:mix2)->>'toolsSheet' = 'pV = nRT', 'инструменты скопированы');
+select pg_temp.check(set_exam_tools(:mix2, array['code'], 'не видно')->'tools' = '["code"]'::jsonb, 'инструменты меняются');
 set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
 select pg_temp.expect_error(format($$ select copy_exam(%s, 'Чужой') $$, :code_id), 'not_found');
 

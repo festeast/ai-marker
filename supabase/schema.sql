@@ -21,6 +21,11 @@ alter table public.exams add column if not exists class_name text;
 alter table public.exams drop constraint if exists exams_type_check;
 alter table public.exams add constraint exams_type_check check (type in ('quiz', 'text', 'mixed'));
 alter table public.exams add column if not exists shuffle boolean not null default false;
+-- Добавлено позже: разрешённые на экзамене инструменты (открываются панелями прямо на странице ученика).
+--   calculator — научный калькулятор; graph — графический калькулятор; code — свободный запуск Python / Java;
+--   periodic — таблица Менделеева; sheet — справочный лист учителя (его текст в tools_sheet).
+alter table public.exams add column if not exists tools text[] not null default '{}';
+alter table public.exams add column if not exists tools_sheet text;
 -- Добавлено позже: строгий режим. Экзамен идёт на весь экран, копирование, вставка и правый клик
 -- запрещены; после max_leaves уходов со страницы (null — без блокировки) работа ученика
 -- блокируется (participants.locked_at), пока учитель её не разблокирует.
@@ -165,6 +170,7 @@ language sql stable as $$
   select jsonb_build_object(
     'id', e.id, 'title', e.title, 'type', e.type, 'status', e.status, 'code', e.code,
     'createdAt', e.created_at, 'publishedAt', e.published_at, 'className', e.class_name, 'shuffle', e.shuffle,
+    'tools', to_jsonb(e.tools), 'toolsSheet', e.tools_sheet,
     'strictMode', e.strict_mode, 'maxLeaves', e.max_leaves)
 $$;
 
@@ -331,6 +337,23 @@ begin
   return _exam_json(e);
 end $$;
 
+-- Разрешённые инструменты и текст справочного листа. Можно менять и во время экзамена:
+-- ученик увидит изменения, когда перезагрузит страницу.
+create or replace function public.set_exam_tools(p_exam_id bigint, p_tools text[], p_sheet text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  if exists (select from unnest(coalesce(p_tools, '{}')) x
+             where x is null or x not in ('calculator', 'graph', 'code', 'periodic', 'sheet')) then
+    raise exception 'invalid_tool';
+  end if;
+  update exams set
+    tools = (select coalesce(array_agg(distinct x order by x), '{}') from unnest(coalesce(p_tools, '{}')) x),
+    tools_sheet = nullif(left(coalesce(p_sheet, ''), 20000), '')
+  where id = e.id returning * into e;
+  return _exam_json(e);
+end $$;
+
 -- Строгий режим и после скольких уходов блокировать работу (null — не блокировать).
 create or replace function public.set_exam_strict(p_exam_id bigint, p_strict boolean, p_max_leaves int default null) returns jsonb
 language plpgsql security definer set search_path = public as $$
@@ -457,7 +480,7 @@ begin
   return _exam_json(e);
 end $$;
 
--- Копия экзамена — новый черновик с теми же вопросами, классом, перемешиванием и материалами.
+-- Копия экзамена — новый черновик с теми же вопросами, классом, перемешиванием, инструментами и материалами.
 -- Ответы учеников и оценки не копируются. Копировать можно экзамен в любом статусе.
 create or replace function public.copy_exam(p_exam_id bigint, p_title text) returns jsonb
 language plpgsql security definer set search_path = public as $$
@@ -466,8 +489,8 @@ declare
   c exams;
 begin
   if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
-  insert into exams (teacher_id, title, type, class_name, shuffle, strict_mode, max_leaves)
-  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.strict_mode, e.max_leaves) returning * into c;
+  insert into exams (teacher_id, title, type, class_name, shuffle, strict_mode, max_leaves, tools, tools_sheet)
+  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.strict_mode, e.max_leaves, e.tools, e.tools_sheet) returning * into c;
   insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
   select c.id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests
   from questions where exam_id = e.id order by position;
@@ -736,6 +759,8 @@ begin
     'name', p.name,
     'submitted', p.submitted_at is not null,
     'exam', jsonb_build_object('title', e.title, 'type', e.type, 'status', e.status,
+      'tools', _attempt_tools(p)->'tools', 'toolsSheet', _attempt_tools(p)->'toolsSheet',
+      'toolRequests', _attempt_tools(p)->'requests',
       'strictMode', e.strict_mode, 'maxLeaves', e.max_leaves),
     'locked', p.locked_at is not null,
     'leaveCount', _leaves_since_unlock(p.id),
@@ -1030,4 +1055,116 @@ begin
         'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id))
         order by u.created_at desc)
       from auth.users u), '[]'::jsonb));
+end $$;
+
+-- ---------- Запросы инструментов ----------
+-- Ученик может попросить инструмент, который учитель не включил. Учитель даёт его одному ученику,
+-- всем, кто попросил, или всем ученикам экзамена (тогда инструмент добавляется в exams.tools).
+create table if not exists public.tool_requests (
+  id bigint generated always as identity primary key,
+  exam_id bigint not null references public.exams(id) on delete cascade,
+  participant_id bigint not null references public.participants(id) on delete cascade,
+  tool text not null,
+  status text not null default 'pending' check (status in ('pending', 'granted', 'denied')),
+  created_at timestamptz not null default now(),
+  decided_at timestamptz,
+  unique (participant_id, tool)
+);
+create index if not exists tool_requests_exam on public.tool_requests(exam_id);
+alter table public.tool_requests enable row level security;
+
+create or replace function public._valid_tool(p_tool text) returns boolean
+language sql immutable as $$ select p_tool in ('calculator', 'graph', 'code', 'periodic', 'sheet') $$;
+
+-- Инструменты ученика: общие для экзамена и выданные лично ему.
+create or replace function public._student_tools(e public.exams, p public.participants) returns text[]
+language sql stable security definer set search_path = public as $$
+  select coalesce(array_agg(distinct x order by x), '{}') from (
+    select unnest(e.tools) x
+    union select tool from tool_requests where participant_id = p.id and status = 'granted') s
+$$;
+
+create or replace function public._attempt_tools(p public.participants) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare
+  e exams;
+  tools text[];
+begin
+  select * into e from exams where id = p.exam_id;
+  tools := _student_tools(e, p);
+  return jsonb_build_object(
+    'tools', to_jsonb(tools),
+    'toolsSheet', case when 'sheet' = any(tools) then e.tools_sheet end,
+    'requests', coalesce((select jsonb_agg(jsonb_build_object('tool', r.tool, 'status', r.status) order by r.id)
+                          from tool_requests r where r.participant_id = p.id), '[]'::jsonb));
+end $$;
+
+revoke execute on function public._student_tools(public.exams, public.participants), public._attempt_tools(public.participants)
+  from public, anon, authenticated;
+
+-- Ученик: какие инструменты сейчас доступны и что с его запросами (страница спрашивает раз в несколько секунд).
+create or replace function public.attempt_tools(p_token uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  return _attempt_tools(_attempt(p_token));
+end $$;
+
+-- Ученик просит инструмент. Повторно после отказа можно; уже доступный просить незачем.
+create or replace function public.request_tool(p_token uuid, p_tool text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  p participants := _attempt(p_token);
+  e exams;
+begin
+  perform _check_writable(p);
+  if not coalesce(_valid_tool(p_tool), false) then raise exception 'invalid_tool'; end if;
+  select * into e from exams where id = p.exam_id;
+  if not (p_tool = any(_student_tools(e, p))) then
+    insert into tool_requests (exam_id, participant_id, tool) values (p.exam_id, p.id, p_tool)
+    on conflict (participant_id, tool) do update set status = 'pending', created_at = now(), decided_at = null
+      where tool_requests.status = 'denied';
+  end if;
+  return _attempt_tools(p);
+end $$;
+
+-- Учитель: запросы по экзамену, сначала ожидающие.
+create or replace function public.list_tool_requests(p_exam_id bigint) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  return jsonb_build_object(
+    'tools', to_jsonb(e.tools),
+    'requests', coalesce((
+      select jsonb_agg(jsonb_build_object('id', r.id, 'participantId', r.participant_id, 'name', pt.name,
+        'tool', r.tool, 'status', r.status, 'createdAt', r.created_at)
+        order by r.status <> 'pending', r.created_at)
+      from tool_requests r join participants pt on pt.id = r.participant_id
+      where r.exam_id = e.id), '[]'::jsonb));
+end $$;
+
+-- Решение учителя по инструменту p_tool.
+--   p_scope = one       — только ученику p_participant_id (дать или отказать);
+--   p_scope = requested — всем, кто сейчас ждёт этот инструмент (дать или отказать);
+--   p_scope = everyone  — дать всем ученикам экзамена: инструмент включается для всего экзамена.
+create or replace function public.decide_tool_requests(p_exam_id bigint, p_tool text, p_grant boolean, p_scope text,
+  p_participant_id bigint default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  e exams := _own_exam(p_exam_id);
+  st text := case when p_grant then 'granted' else 'denied' end;
+begin
+  if not coalesce(_valid_tool(p_tool), false) then raise exception 'invalid_tool'; end if;
+  if p_scope = 'one' then
+    update tool_requests set status = st, decided_at = now()
+    where exam_id = e.id and participant_id = p_participant_id and tool = p_tool;
+    if not found then raise exception 'not_found'; end if;
+  elsif p_scope = 'requested' then
+    update tool_requests set status = st, decided_at = now() where exam_id = e.id and tool = p_tool and status = 'pending';
+  elsif p_scope = 'everyone' and p_grant then
+    update exams set tools = (select array_agg(distinct x order by x) from unnest(tools || p_tool) x) where id = e.id;
+    update tool_requests set status = 'granted', decided_at = now() where exam_id = e.id and tool = p_tool and status = 'pending';
+  else
+    raise exception 'invalid_request';
+  end if;
+  return list_tool_requests(e.id);
 end $$;

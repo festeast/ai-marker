@@ -43,6 +43,13 @@
         <button id="submit" data-i18n="submit"></button>
       </div>
     </div>
+    <dialog id="submit-dialog" class="confirm-dialog">
+      <p data-i18n="submit_q"></p>
+      <div class="row spread">
+        <button type="button" class="secondary" id="submit-cancel" data-i18n="cancel"></button>
+        <button type="button" id="submit-ok" data-i18n="submit"></button>
+      </div>
+    </dialog>
     <div class="card" id="done" hidden><p class="ok" data-i18n="submitted_msg"></p></div>
     <div class="error" id="err"></div>
   </main>
@@ -468,11 +475,13 @@
       } catch (err) { showError(err); }
     });
 
-    document.getElementById('submit').addEventListener('click', async () => {
-      suppress = true; // диалог подтверждения снимает фокус — это не уход
-      const ok = confirm(t('submit_q'));
-      suppress = false;
-      if (!ok) return;
+    // Подтверждение сдачи — окно внутри страницы, а не confirm(): системное окно выводит браузер
+    // из полного экрана и снимает фокус, и в строгом режиме это засчитывалось как выход.
+    const submitDialog = document.getElementById('submit-dialog');
+    document.getElementById('submit').addEventListener('click', () => submitDialog.showModal());
+    document.getElementById('submit-cancel').addEventListener('click', () => submitDialog.close());
+    document.getElementById('submit-ok').addEventListener('click', () => {
+      submitDialog.close();
       storeLocal();
       trySubmit();
     });

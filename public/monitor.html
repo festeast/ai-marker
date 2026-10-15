@@ -158,12 +158,12 @@
             list.length > 1 ? el('button', { class: 'danger small', onclick: decide(tool, false, 'requested') }, t('tool_deny_requested')) : null));
       });
       const done = data.requests.filter((r) => r.status !== 'pending');
-      box.replaceChildren(
+      box.replaceChildren(...[
         el('h2', {}, t('tool_requests'), pending.length ? el('span', { class: 'badge flag', style: 'margin-left:8px' }, String(pending.length)) : null),
         groups.length ? el('div', {}, groups) : el('p', { class: 'muted' }, t('tool_req_none')),
         done.length ? el('details', { style: 'margin-top:8px' }, el('summary', { class: 'muted' }, t('tool_req_done') + ': ' + done.length),
           el('ul', { class: 'events' }, done.map((r) => el('li', {}, el('b', {}, r.name), ' — ', t('tool_' + r.tool + '_short'), ': ', t('tool_req_' + r.status))))) : null,
-        msg);
+        msg].filter(Boolean));
     }
     async function pollToolRequests() {
       try { renderToolRequests(await rpc('list_tool_requests', { p_exam_id: id })); } catch {}

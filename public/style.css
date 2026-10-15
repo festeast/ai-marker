@@ -230,3 +230,6 @@ body:has(#attempt[hidden]) .tools-dock, body:has(#attempt[hidden]) .tool-panel {
 .tool-ask-row > span:first-child { flex: 1; }
 .tool-req { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .tool-req:last-child { border-bottom: 0; }
+.confirm-dialog { border: 1px solid var(--line); border-radius: 12px; padding: 20px; max-width: min(420px, calc(100vw - 32px)); box-shadow: 0 8px 28px rgba(0,0,0,.2); }
+.confirm-dialog::backdrop { background: rgba(0,0,0,.35); }
+.confirm-dialog p { margin-top: 0; }

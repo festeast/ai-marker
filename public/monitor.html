@@ -26,6 +26,10 @@
       <p class="row"><a class="btn secondary" id="results-link" data-i18n="results"></a>
         <button class="danger small" id="close" hidden data-i18n="close_exam"></button></p>
     </div>
+    <details class="card" id="tools-box" hidden>
+      <summary><b data-i18n="tools_title"></b> <span class="muted" id="tools-summary"></span></summary>
+      <div id="tools" style="margin-top:12px"></div>
+    </details>
     <div class="card">
       <h2 data-i18n="participants"></h2>
       <div id="participants"></div>
@@ -43,6 +47,19 @@
     const id = Number(new URLSearchParams(location.search).get('id'));
     document.getElementById('results-link').href = 'results.html?id=' + id;
     let lastEventId = 0;
+    let toolsShown = false;
+
+    // Инструменты можно включить и во время экзамена (ученик увидит их после перезагрузки страницы).
+    function showTools(exam) {
+      const box = document.getElementById('tools-box');
+      const summary = () => {
+        document.getElementById('tools-summary').textContent = (exam.tools || []).length
+          ? '— ' + exam.tools.map((k) => t('tool_' + k)).join(', ') : '— ' + t('tools_none');
+      };
+      renderToolsEditor(document.getElementById('tools'), exam, { heading: false, onSave: summary });
+      summary();
+      box.hidden = false;
+    }
     const events = [];
 
     function copy(text, btn) {
@@ -108,6 +125,7 @@
         document.getElementById('code').textContent = x.code;
         const link = document.getElementById('link');
         link.textContent = link.href = examLink(x.code);
+        if (!toolsShown && x.status !== 'closed') { toolsShown = true; showTools(x); }
         renderParticipants(data);
         if (data.events.length) {
           events.push(...data.events);

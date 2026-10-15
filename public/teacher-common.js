@@ -116,3 +116,46 @@ async function renderExamMeta(box, exam) {
     el('datalist', { id: listId }, classes.map((c) => el('option', { value: c }))),
     el('label', {}, t('exam_materials')), el('p', { class: 'muted', style: 'margin:0 0 6px' }, t('exam_materials_hint')), checks);
 }
+
+// Разрешённые на экзамене инструменты (калькулятор, таблица Менделеева и т. д.) — галочки и справочный лист.
+// Сохраняется сразу; ученик видит изменения, когда открывает или перезагружает страницу экзамена.
+const EXAM_TOOLS = ['calculator', 'graph', 'code', 'periodic', 'sheet'];
+function renderToolsEditor(box, exam, { heading = true, onSave } = {}) {
+  const chosen = new Set(exam.tools || []);
+  const msg = el('span', { class: 'muted' });
+  const sheet = el('textarea', { rows: 5, maxlength: 20000, placeholder: t('tool_sheet_placeholder') });
+  sheet.value = exam.toolsSheet || '';
+  const sheetBox = el('div', {}, sheet);
+  sheetBox.hidden = !chosen.has('sheet');
+
+  let timer = null;
+  async function save() {
+    clearTimeout(timer);
+    msg.className = 'muted'; msg.textContent = '';
+    try {
+      const res = await rpc('set_exam_tools', { p_exam_id: exam.id, p_tools: EXAM_TOOLS.filter((x) => chosen.has(x)), p_sheet: sheet.value });
+      exam.tools = res.tools; exam.toolsSheet = res.toolsSheet;
+      if (onSave) onSave();
+      msg.className = 'ok'; msg.textContent = t('saved');
+      setTimeout(() => { if (msg.textContent === t('saved')) msg.textContent = ''; }, 2000);
+    } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
+  }
+  sheet.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(save, 1000); });
+  sheet.addEventListener('change', save);
+
+  box.replaceChildren(...[
+    heading ? el('h2', {}, t('tools_title')) : null,
+    el('p', { class: 'muted', style: 'margin:0' }, t('tools_hint')),
+    ...EXAM_TOOLS.map((k) => {
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = chosen.has(k);
+      cb.addEventListener('change', () => {
+        if (cb.checked) chosen.add(k); else chosen.delete(k);
+        sheetBox.hidden = !chosen.has('sheet');
+        save();
+      });
+      return el('label', { class: 'check' }, cb, el('span', {}, t('tool_' + k), el('span', { class: 'muted' }, ' — ' + t('tool_' + k + '_hint'))));
+    }),
+    sheetBox,
+    el('div', { style: 'margin-top:8px' }, msg)].filter(Boolean));
+}

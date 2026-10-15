@@ -21,6 +21,11 @@ alter table public.exams add column if not exists class_name text;
 alter table public.exams drop constraint if exists exams_type_check;
 alter table public.exams add constraint exams_type_check check (type in ('quiz', 'text', 'mixed'));
 alter table public.exams add column if not exists shuffle boolean not null default false;
+-- Добавлено позже: разрешённые на экзамене инструменты (открываются панелями прямо на странице ученика).
+--   calculator — научный калькулятор; graph — графический калькулятор; code — свободный запуск Python / Java;
+--   periodic — таблица Менделеева; sheet — справочный лист учителя (его текст в tools_sheet).
+alter table public.exams add column if not exists tools text[] not null default '{}';
+alter table public.exams add column if not exists tools_sheet text;
 
 create table if not exists public.questions (
   id bigint generated always as identity primary key,
@@ -158,7 +163,8 @@ create or replace function public._exam_json(e public.exams) returns jsonb
 language sql stable as $$
   select jsonb_build_object(
     'id', e.id, 'title', e.title, 'type', e.type, 'status', e.status, 'code', e.code,
-    'createdAt', e.created_at, 'publishedAt', e.published_at, 'className', e.class_name, 'shuffle', e.shuffle)
+    'createdAt', e.created_at, 'publishedAt', e.published_at, 'className', e.class_name, 'shuffle', e.shuffle,
+    'tools', to_jsonb(e.tools), 'toolsSheet', e.tools_sheet)
 $$;
 
 create or replace function public._questions_json(p_exam_id bigint, p_with_answers boolean) returns jsonb
@@ -315,6 +321,23 @@ begin
   return _exam_json(e);
 end $$;
 
+-- Разрешённые инструменты и текст справочного листа. Можно менять и во время экзамена:
+-- ученик увидит изменения, когда перезагрузит страницу.
+create or replace function public.set_exam_tools(p_exam_id bigint, p_tools text[], p_sheet text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  if exists (select from unnest(coalesce(p_tools, '{}')) x
+             where x is null or x not in ('calculator', 'graph', 'code', 'periodic', 'sheet')) then
+    raise exception 'invalid_tool';
+  end if;
+  update exams set
+    tools = (select coalesce(array_agg(distinct x order by x), '{}') from unnest(coalesce(p_tools, '{}')) x),
+    tools_sheet = nullif(left(coalesce(p_sheet, ''), 20000), '')
+  where id = e.id returning * into e;
+  return _exam_json(e);
+end $$;
+
 create or replace function public.get_exam(p_exam_id bigint) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 declare e exams := _own_exam(p_exam_id);
@@ -431,7 +454,7 @@ begin
   return _exam_json(e);
 end $$;
 
--- Копия экзамена — новый черновик с теми же вопросами, классом, перемешиванием и материалами.
+-- Копия экзамена — новый черновик с теми же вопросами, классом, перемешиванием, инструментами и материалами.
 -- Ответы учеников и оценки не копируются. Копировать можно экзамен в любом статусе.
 create or replace function public.copy_exam(p_exam_id bigint, p_title text) returns jsonb
 language plpgsql security definer set search_path = public as $$
@@ -440,8 +463,8 @@ declare
   c exams;
 begin
   if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
-  insert into exams (teacher_id, title, type, class_name, shuffle)
-  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle) returning * into c;
+  insert into exams (teacher_id, title, type, class_name, shuffle, tools, tools_sheet)
+  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.tools, e.tools_sheet) returning * into c;
   insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
   select c.id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests
   from questions where exam_id = e.id order by position;
@@ -695,7 +718,8 @@ begin
   return jsonb_build_object(
     'name', p.name,
     'submitted', p.submitted_at is not null,
-    'exam', jsonb_build_object('title', e.title, 'type', e.type, 'status', e.status),
+    'exam', jsonb_build_object('title', e.title, 'type', e.type, 'status', e.status,
+      'tools', to_jsonb(e.tools), 'toolsSheet', case when 'sheet' = any(e.tools) then e.tools_sheet end),
     'questions', _student_questions(e, p.token::text),
     'answers', coalesce((select jsonb_object_agg(a.question_id::text, a.value) from answers a where a.participant_id = p.id), '{}'::jsonb));
 end $$;

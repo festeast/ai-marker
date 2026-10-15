@@ -20,6 +20,7 @@
       <p class="muted small" data-i18n="shuffle_hint"></p>
       <div id="meta"></div>
     </div>
+    <div class="card" id="tools"></div>
     <details class="card" id="gen-box">
       <summary><b data-i18n="gen_title"></b></summary>
       <p class="muted" data-i18n="gen_intro"></p>
@@ -338,6 +339,7 @@
       if (!exam.questions.length) exam.questions.push(blankQuestion());
       render();
       renderExamMeta(document.getElementById('meta'), exam).catch(showPageError);
+      renderToolsEditor(document.getElementById('tools'), exam);
       renderGenerator().catch(showPageError);
     }).catch(showPageError);
   </script>

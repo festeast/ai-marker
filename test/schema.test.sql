@@ -404,3 +404,51 @@ select pg_temp.check(exam_results(:code_id)->'participants' = '[]'::jsonb, 'уч
 reset role;
 select pg_temp.check(not exists (select from answers where participant_id = :pid_c)
   and not exists (select from feedback where participant_id = :pid_c), 'ответы и отзыв удалены');
+
+-- ---------- строгий режим: блокировка после N уходов ----------
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (create_exam('Строгий', 'quiz')->>'id')::bigint as strict_id \gset
+select pg_temp.expect_error(format('select set_exam_strict(%s, true, 0)', :strict_id), 'invalid_request');
+select pg_temp.check((set_exam_strict(:strict_id, true, 2)->>'maxLeaves') = '2', 'строгий режим включён');
+select save_exam(:strict_id, 'Строгий', '[{"text":"2+2","options":["3","4"],"correctIndex":1}]');
+select publish_exam(:strict_id)->>'code' as strict_code \gset
+select pg_temp.check((copy_exam(:strict_id, 'Копия строгого')->>'strictMode')::boolean, 'копия сохраняет строгий режим');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error(format('select set_exam_strict(%s, false)', :strict_id), 'not_found');
+reset request.jwt.claim.sub;
+reset role;
+set role anon;
+select join_exam(:'strict_code', 'Арман') as ts \gset
+select pg_temp.check((get_attempt(:'ts')->'exam'->>'strictMode')::boolean and (get_attempt(:'ts')->'exam'->>'maxLeaves') = '2', 'ученик видит настройки строгого режима');
+select log_event(:'ts', 'paste', '{"text":"скопированный текст","blocked":true}');
+select log_event(:'ts', 'leave', '{"reason":"fullscreen"}');
+select log_event(:'ts', 'return', '{"awayMs":1000}');
+select save_answers(:'ts', '{}');
+select pg_temp.check((get_attempt(:'ts')->>'leaveCount') = '1', 'один уход');
+select log_event(:'ts', 'leave', '{"reason":"hidden"}');
+select pg_temp.check((get_attempt(:'ts')->>'locked')::boolean, 'после второго ухода работа заблокирована');
+select pg_temp.expect_error(format($$ select save_answers(%L, '{}') $$, :'ts'), 'attempt_locked');
+select pg_temp.expect_error(format($$ select submit_attempt(%L, '{}') $$, :'ts'), 'attempt_locked');
+select pg_temp.expect_error(format('select unlock_participant(1)'), 'unauthorized');
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (p->>'id')::bigint as pid_s from jsonb_array_elements(exam_monitor(:strict_id, 0)->'participants') p \gset
+select pg_temp.check(exam_monitor(:strict_id, 0)->'participants'->0->>'status' = 'locked', 'в мониторинге статус «заблокирован»');
+select pg_temp.check(exists (select from jsonb_array_elements(exam_monitor(:strict_id, 0)->'events') ev where ev->>'type' = 'lock'), 'событие блокировки');
+select pg_temp.check(exists (select from jsonb_array_elements(exam_monitor(:strict_id, 0)->'events') ev
+  where ev->>'type' = 'paste' and (ev->'detail'->>'blocked')::boolean and not (ev->'detail'->>'large')::boolean), 'запрещённая вставка записана, но не считается большой');
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error(format('select unlock_participant(%s)', :pid_s), 'not_found');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select unlock_participant(:pid_s);
+reset request.jwt.claim.sub;
+reset role;
+set role anon;
+select pg_temp.check(not (get_attempt(:'ts')->>'locked')::boolean and (get_attempt(:'ts')->>'leaveCount') = '0', 'разблокирован, счёт уходов сначала');
+select log_event(:'ts', 'return', '{"awayMs":5000}');
+select log_event(:'ts', 'leave', '{"reason":"blur"}');
+select pg_temp.check(not (get_attempt(:'ts')->>'locked')::boolean, 'один уход после разблокировки — ещё не блокировка');
+select submit_attempt(:'ts', '{"0":"1"}');

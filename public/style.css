@@ -214,3 +214,13 @@ body.has-tools main.wrap { padding-bottom: 96px; }
 .pt-alkali { background: #ffd8a8; } .pt-alkaline { background: #ffe8a3; } .pt-transition { background: #f3d9e8; }
 .pt-post { background: #d3e4cd; } .pt-metalloid { background: #c7ecee; } .pt-nonmetal { background: #d0ebff; }
 .pt-halogen { background: #e5dbff; } .pt-noble { background: #fcc2d7; } .pt-lanthanide { background: #e9ecc0; } .pt-actinide { background: #f8e1c4; }
+/* Строгий режим экзамена */
+.strict-gate { text-align: center; }
+.strict-gate button { margin-top: 8px; }
+body.strict #questions { -webkit-user-select: none; user-select: none; }
+body.strict #questions textarea { -webkit-user-select: text; user-select: text; }
+.strict-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20; background: #2b2f36; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: calc(100% - 32px); }
+.badge.locked { background: #fde2e2; color: var(--bad); }
+@media print { body.strict main { display: none; } }
+/* пока вопросы скрыты (заставка строгого режима, блокировка, работа сдана) — инструментов не видно */
+body:has(#attempt[hidden]) .tools-dock, body:has(#attempt[hidden]) .tool-panel { display: none; }

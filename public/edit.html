@@ -18,6 +18,13 @@
       <p class="muted" id="type"></p>
       <label class="check"><input type="checkbox" id="shuffle"> <span data-i18n="shuffle_label"></span></label>
       <p class="muted small" data-i18n="shuffle_hint"></p>
+      <label class="check"><input type="checkbox" id="strict"> <span data-i18n="strict_label"></span></label>
+      <p class="muted small" data-i18n="strict_hint"></p>
+      <div id="strict-opts" hidden>
+        <label for="max-leaves" data-i18n="strict_max_leaves"></label>
+        <input type="number" id="max-leaves" min="1" max="100" style="max-width:120px">
+        <p class="muted small" data-i18n="strict_max_leaves_hint"></p>
+      </div>
       <div id="meta"></div>
     </div>
     <div class="card" id="tools"></div>
@@ -287,10 +294,11 @@
       const lang = el('select', {}, ['ru', 'kk', 'en', 'tr'].map((code) => el('option', { value: code }, t('gen_lang_' + code))));
       lang.value = LANG;
       const wishes = el('input', { type: 'text', maxlength: 500, placeholder: t('gen_wishes_placeholder') });
-      const model = el('select', {}, el('option', { value: 'free' }, t('ai_model_free')), el('option', { value: 'paid' }, t('ai_model_paid')));
+      const model = el('select', {}, el('option', { value: 'free' }, t('ai_model_free')), el('option', { value: 'paid' }, t('ai_model_paid')),
+        el('option', { value: 'paid:gpt' }, t('ai_model_paid_gpt')));
       let saved = 'free';
       try { saved = localStorage.getItem('aiQuality') || 'free'; } catch {}
-      if (saved === 'paid') model.value = 'paid';
+      if (saved === 'paid' || saved === 'paid:gpt') model.value = saved;
       const genKind = el('select', {}, el('option', { value: 'quiz' }, t('type_quiz')), el('option', { value: 'text' }, t('type_text')));
       const msg = el('span', { class: 'muted' });
       const btn = el('button', { type: 'button' }, t('gen_btn'));
@@ -302,7 +310,7 @@
           const res = await callFunction('grade', {
             action: 'generate', materialId: Number(material.value), count: Number(count.value) || 5,
             examType: exam.type === 'mixed' ? genKind.value : exam.type, lang: lang.value, wishes: wishes.value,
-            quality: model.value === 'paid' ? 'paid' : (saved.startsWith('free:') ? saved : 'free'),
+            quality: model.value !== 'free' ? model.value : (saved.startsWith('free:') ? saved : 'free'),
           });
           // Пустые вопросы-заготовки убираем, новые добавляем в конец.
           exam.questions = exam.questions.filter((q) => q.text.trim());
@@ -336,6 +344,20 @@
         await rpc('set_exam_shuffle', { p_exam_id: id, p_shuffle: shuffle.checked });
         exam.shuffle = shuffle.checked;
       }));
+      const strict = document.getElementById('strict'), maxLeaves = document.getElementById('max-leaves');
+      strict.checked = !!exam.strictMode;
+      maxLeaves.value = exam.maxLeaves || '';
+      document.getElementById('strict-opts').hidden = !strict.checked;
+      const saveStrict = withErrors(async () => {
+        const n = Math.round(Number(maxLeaves.value));
+        const max = maxLeaves.value.trim() && n >= 1 ? Math.min(n, 100) : null;
+        maxLeaves.value = max || '';
+        const res = await rpc('set_exam_strict', { p_exam_id: id, p_strict: strict.checked, p_max_leaves: max });
+        exam.strictMode = res.strictMode; exam.maxLeaves = res.maxLeaves;
+        document.getElementById('strict-opts').hidden = !strict.checked;
+      });
+      strict.addEventListener('change', saveStrict);
+      maxLeaves.addEventListener('change', saveStrict);
       if (!exam.questions.length) exam.questions.push(blankQuestion());
       render();
       renderExamMeta(document.getElementById('meta'), exam).catch(showPageError);

@@ -26,6 +26,11 @@ alter table public.exams add column if not exists shuffle boolean not null defau
 --   periodic — таблица Менделеева; sheet — справочный лист учителя (его текст в tools_sheet).
 alter table public.exams add column if not exists tools text[] not null default '{}';
 alter table public.exams add column if not exists tools_sheet text;
+-- Добавлено позже: строгий режим. Экзамен идёт на весь экран, копирование, вставка и правый клик
+-- запрещены; после max_leaves уходов со страницы (null — без блокировки) работа ученика
+-- блокируется (participants.locked_at), пока учитель её не разблокирует.
+alter table public.exams add column if not exists strict_mode boolean not null default false;
+alter table public.exams add column if not exists max_leaves int;
 
 create table if not exists public.questions (
   id bigint generated always as identity primary key,
@@ -68,6 +73,7 @@ create table if not exists public.participants (
   last_seen timestamptz not null default now(),
   submitted_at timestamptz
 );
+alter table public.participants add column if not exists locked_at timestamptz;
 
 create table if not exists public.answers (
   participant_id bigint not null references public.participants(id) on delete cascade,
@@ -99,7 +105,7 @@ create table if not exists public.feedback (
   updated_at timestamptz not null default now()
 );
 
--- type: join | leave | return | paste | submit
+-- type: join | leave | return | paste | submit | lock | unlock
 create table if not exists public.events (
   id bigint generated always as identity primary key,
   exam_id bigint not null references public.exams(id) on delete cascade,
@@ -164,7 +170,8 @@ language sql stable as $$
   select jsonb_build_object(
     'id', e.id, 'title', e.title, 'type', e.type, 'status', e.status, 'code', e.code,
     'createdAt', e.created_at, 'publishedAt', e.published_at, 'className', e.class_name, 'shuffle', e.shuffle,
-    'tools', to_jsonb(e.tools), 'toolsSheet', e.tools_sheet)
+    'tools', to_jsonb(e.tools), 'toolsSheet', e.tools_sheet,
+    'strictMode', e.strict_mode, 'maxLeaves', e.max_leaves)
 $$;
 
 create or replace function public._questions_json(p_exam_id bigint, p_with_answers boolean) returns jsonb
@@ -275,7 +282,16 @@ language plpgsql stable security definer set search_path = public as $$
 begin
   if p.submitted_at is not null then raise exception 'already_submitted'; end if;
   if (select status from exams where id = p.exam_id) <> 'published' then raise exception 'exam_not_open'; end if;
+  if p.locked_at is not null then raise exception 'attempt_locked'; end if;
 end $$;
+
+-- Сколько раз ученик уходил со страницы после последней разблокировки.
+create or replace function public._leaves_since_unlock(p_participant_id bigint) returns bigint
+language sql stable security definer set search_path = public as $$
+  select count(*) from events
+  where participant_id = p_participant_id and type = 'leave'
+    and id > coalesce((select max(id) from events where participant_id = p_participant_id and type = 'unlock'), 0)
+$$;
 
 revoke execute on function public._is_correct(public.questions, text), public._q_score(public.questions, text, numeric),
   public._student_questions(public.exams, text)
@@ -283,7 +299,7 @@ revoke execute on function public._is_correct(public.questions, text), public._q
 
 revoke execute on function public._own_exam(bigint), public._attempt(uuid),
   public._add_event(public.participants, text, jsonb), public._save_answers(public.participants, jsonb),
-  public._check_writable(public.participants)
+  public._check_writable(public.participants), public._leaves_since_unlock(bigint)
   from public, anon, authenticated;
 
 -- ---------- Учитель ----------
@@ -335,6 +351,16 @@ begin
     tools = (select coalesce(array_agg(distinct x order by x), '{}') from unnest(coalesce(p_tools, '{}')) x),
     tools_sheet = nullif(left(coalesce(p_sheet, ''), 20000), '')
   where id = e.id returning * into e;
+  return _exam_json(e);
+end $$;
+
+-- Строгий режим и после скольких уходов блокировать работу (null — не блокировать).
+create or replace function public.set_exam_strict(p_exam_id bigint, p_strict boolean, p_max_leaves int default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare e exams := _own_exam(p_exam_id);
+begin
+  if p_max_leaves is not null and (p_max_leaves < 1 or p_max_leaves > 100) then raise exception 'invalid_request'; end if;
+  update exams set strict_mode = coalesce(p_strict, false), max_leaves = p_max_leaves where id = e.id returning * into e;
   return _exam_json(e);
 end $$;
 
@@ -463,8 +489,8 @@ declare
   c exams;
 begin
   if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
-  insert into exams (teacher_id, title, type, class_name, shuffle, tools, tools_sheet)
-  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.tools, e.tools_sheet) returning * into c;
+  insert into exams (teacher_id, title, type, class_name, shuffle, strict_mode, max_leaves, tools, tools_sheet)
+  values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.strict_mode, e.max_leaves, e.tools, e.tools_sheet) returning * into c;
   insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests)
   select c.id, position, kind, text, options, correct_index, points, reference, code_lang, starter, tests
   from questions where exam_id = e.id order by position;
@@ -500,6 +526,7 @@ begin
           'submittedAt', p.submitted_at,
           'status', case
             when p.submitted_at is not null then 'submitted'
+            when p.locked_at is not null then 'locked'
             when now() - p.last_seen > online_window() then 'offline'
             when (select ev.type from events ev where ev.participant_id = p.id and ev.type in ('leave', 'return')
                   order by ev.id desc limit 1) = 'leave' then 'away'
@@ -682,6 +709,19 @@ begin
   delete from participants where id = p.id;
 end $$;
 
+-- Снимает блокировку строгого режима: ученик продолжает работу, счёт уходов начинается заново.
+create or replace function public.unlock_participant(p_participant_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare p participants;
+begin
+  select * into p from participants where id = p_participant_id;
+  if not found then raise exception 'not_found'; end if;
+  perform _own_exam(p.exam_id);
+  if p.locked_at is null then return; end if;
+  update participants set locked_at = null where id = p.id;
+  perform _add_event(p, 'unlock', null);
+end $$;
+
 -- ---------- Студент (без аккаунта: код + имя) ----------
 
 create or replace function public.exam_by_code(p_code text) returns jsonb
@@ -719,7 +759,10 @@ begin
     'name', p.name,
     'submitted', p.submitted_at is not null,
     'exam', jsonb_build_object('title', e.title, 'type', e.type, 'status', e.status,
-      'tools', to_jsonb(e.tools), 'toolsSheet', case when 'sheet' = any(e.tools) then e.tools_sheet end),
+      'tools', to_jsonb(e.tools), 'toolsSheet', case when 'sheet' = any(e.tools) then e.tools_sheet end,
+      'strictMode', e.strict_mode, 'maxLeaves', e.max_leaves),
+    'locked', p.locked_at is not null,
+    'leaveCount', _leaves_since_unlock(p.id),
     'questions', _student_questions(e, p.token::text),
     'answers', coalesce((select jsonb_object_agg(a.question_id::text, a.value) from answers a where a.participant_id = p.id), '{}'::jsonb));
 end $$;
@@ -738,7 +781,8 @@ begin
   perform _attempt(p_token);
 end $$;
 
--- p_type: leave {reason} | return {awayMs} | paste {text, questionId}
+-- p_type: leave {reason} | return {awayMs} | paste {text, questionId, blocked}
+-- В строгом режиме уход номер max_leaves блокирует работу (событие lock).
 create or replace function public.log_event(p_token uuid, p_type text, p_detail jsonb default '{}') returns void
 language plpgsql security definer set search_path = public as $$
 declare
@@ -747,6 +791,7 @@ declare
   pasted text;
   len int;
   last_focus text;
+  e exams;
 begin
   if p.submitted_at is not null then return; end if;
   -- уход и возвращение чередуются: повторный «ушёл» или «вернулся» без ухода не пишем
@@ -756,6 +801,12 @@ begin
   if p_type = 'return' and last_focus is distinct from 'leave' then return; end if;
   if p_type = 'leave' then
     perform _add_event(p, 'leave', jsonb_build_object('reason', left(coalesce(d->>'reason', 'hidden'), 20)));
+    select * into e from exams where id = p.exam_id;
+    if e.strict_mode and e.max_leaves is not null and p.locked_at is null and e.status = 'published'
+       and _leaves_since_unlock(p.id) >= e.max_leaves then
+      update participants set locked_at = now() where id = p.id;
+      perform _add_event(p, 'lock', jsonb_build_object('leaves', e.max_leaves));
+    end if;
   elsif p_type = 'return' then
     perform _add_event(p, 'return', jsonb_build_object(
       'awayMs', greatest(0, least(coalesce((d->>'awayMs')::numeric, 0), 86400000))::bigint));
@@ -764,7 +815,8 @@ begin
     len := length(pasted);
     perform _add_event(p, 'paste', jsonb_build_object(
       'length', len,
-      'large', len >= large_paste_chars(),
+      'large', len >= large_paste_chars() and d->'blocked' is distinct from 'true'::jsonb,
+      'blocked', coalesce(d->'blocked' = 'true'::jsonb, false),
       'questionId', case when jsonb_typeof(d->'questionId') = 'number' then (d->>'questionId')::bigint end,
       'snippet', left(pasted, 500)));
   else

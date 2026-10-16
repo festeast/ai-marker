@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
-  <script src="code-runner.js"></script>
+  <script src="code-runner.js"></script><script src="science.js"></script>
   <script src="calc-engine.js"></script><script src="exam-tools.js"></script>
   <script src="tool-graph.js"></script><script src="periodic-data.js"></script><script src="tool-periodic.js"></script>
 </head>
@@ -402,7 +402,9 @@
         const kind = q.kind || (data.exam.type === 'text' ? 'text' : 'choice');
         if (kind === 'order') renderOrder(q, parts);
         else if (kind === 'code') renderCode(q, parts);
-        else if (kind === 'choice' || kind === 'truefalse') {
+        else if (kind === 'formula' || kind === 'table') {
+          parts.push(Sci.studentView(q, answers[q.id], (v) => { answers[q.id] = v; scheduleSave(); }));
+        } else if (kind === 'choice' || kind === 'truefalse') {
           q.options.forEach((opt, j) => {
             const value = String(typeof opt === 'object' ? opt.i : j);
             const radio = el('input', { type: 'radio', name: 'q' + q.id, value });

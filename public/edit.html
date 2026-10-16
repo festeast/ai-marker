@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
-  <script src="teacher-common.js"></script><script src="code-runner.js"></script>
+  <script src="teacher-common.js"></script><script src="code-runner.js"></script><script src="science.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -64,9 +64,10 @@
 
     // Какие типы вопросов можно добавить в экзамен такого типа.
     function allowedKinds() {
-      if (exam.type === 'text') return ['text', 'code'];
-      if (exam.type === 'quiz') return ['choice', 'truefalse', 'order'];
-      return ['choice', 'truefalse', 'order', 'text', 'code'];
+      // «Формула / реакция» и «Заполни таблицу» — в любом экзамене.
+      if (exam.type === 'text') return ['text', 'code', 'formula', 'table'];
+      if (exam.type === 'quiz') return ['choice', 'truefalse', 'order', 'formula', 'table'];
+      return ['choice', 'truefalse', 'order', 'text', 'code', 'formula', 'table'];
     }
 
     function blankQuestion(kind) {
@@ -76,6 +77,11 @@
       if (kind === 'truefalse') Object.assign(q, { options: [t('tf_true'), t('tf_false')], correctIndex: 0 });
       if (kind === 'order') Object.assign(q, { options: ['', '', ''] });
       if (kind === 'code') Object.assign(q, { lang: 'python', starter: CodeRunner.starter('python'), tests: [{ input: '', output: '' }] });
+      if (kind === 'formula') q.spec = { mode: 'blanks', template: '', chem: true, cs: true };
+      if (kind === 'table') {
+        const cell = (b) => (b ? { v: '', b: true } : { v: '' });
+        q.spec = { header: true, chem: false, cs: false, rows: [[cell(), cell()], [cell(), cell(true)], [cell(), cell(true)]] };
+      }
       return q;
     }
 
@@ -208,6 +214,89 @@
           fill, msg));
     }
 
+    const check = (label, on, onchange) => {
+      const box = el('input', { type: 'checkbox' });
+      box.checked = !!on;
+      box.addEventListener('change', () => onchange(box.checked));
+      return el('label', { class: 'check' }, box, ' ', el('span', {}, label));
+    };
+
+    // Формула или реакция: пропуски в [скобках] или ответ целиком (несколько верных вариантов).
+    function renderFormula(q, parts) {
+      const s = q.spec || (q.spec = { mode: 'blanks', template: '', chem: true, cs: true });
+      const kit = Sci.kit({ chem: s.chem });
+      const mode = el('select', { style: 'width:auto;margin:0' }, ['blanks', 'full'].map((m) => el('option', { value: m }, t('formula_mode_' + m))));
+      mode.value = s.mode === 'full' ? 'full' : 'blanks';
+      mode.addEventListener('change', () => {
+        // Переносим уже написанное: шаблон без скобок становится ответом и наоборот.
+        if (mode.value === 'full') {
+          s.answers = (s.answers || []).filter((a) => a.trim()).length ? s.answers : [Sci.correctText({ kind: 'formula', spec: s })];
+        } else if (!(s.template || '').trim()) s.template = (s.answers || [])[0] || '';
+        s.mode = mode.value;
+        render();
+      });
+      parts.push(el('label', { class: 'row' }, t('formula_mode'), mode),
+        check(t('sci_chem'), s.chem, (v) => { s.chem = v; kit.setChem(v); }),
+        check(t('sci_cs'), s.cs !== false, (v) => { s.cs = v; }));
+      if (s.mode === 'full') {
+        if (!s.answers || !s.answers.length) s.answers = [''];
+        const rows = s.answers.map((a, j) => {
+          const input = kit.bind(el('input', { type: 'text', class: 'sci-input', placeholder: t('sci_full_placeholder') }), (v) => { s.answers[j] = v; });
+          input.value = a;
+          return el('div', { class: 'option' }, input,
+            s.answers.length > 1 ? el('button', { type: 'button', class: 'secondary small', title: t('remove'), onclick: () => { s.answers.splice(j, 1); render(); } }, '×') : null);
+        });
+        parts.push(el('label', {}, t('formula_answers')), kit.node, ...rows,
+          el('p', { class: 'muted small' }, t('formula_answers_hint')),
+          el('button', { type: 'button', class: 'secondary small', onclick: () => { s.answers.push(''); render(); } }, t('formula_add_answer')));
+        return;
+      }
+      const preview = el('div', { class: 'sci-formula sci-preview' });
+      const drawPreview = () => {
+        const { parts: bits } = Sci.splitTemplate(s.template);
+        preview.replaceChildren(...bits.flatMap((b, k) => (k < bits.length - 1 ? [el('span', {}, b), el('span', { class: 'sci-box' })] : [el('span', {}, b)])));
+      };
+      const tpl = kit.bind(el('input', { type: 'text', class: 'sci-input', placeholder: t('formula_template_placeholder') }), (v) => { s.template = v; drawPreview(); });
+      tpl.value = s.template || '';
+      drawPreview();
+      parts.push(el('label', {}, t('formula_template')), kit.node, tpl,
+        el('p', { class: 'muted small' }, t('formula_template_hint')),
+        el('div', { class: 'muted small' }, t('formula_preview')), preview);
+    }
+
+    // «Заполни таблицу»: сетка ячеек; отмеченные заполняет ученик, в них — верный ответ.
+    function renderTable(q, parts) {
+      const s = q.spec;
+      const kit = Sci.kit({ chem: s.chem });
+      const cols = s.rows[0].length;
+      const body = s.rows.map((row, r) => el('tr', {}, row.map((c) => {
+        const input = kit.bind(el('input', { type: 'text', class: 'sci-cell', placeholder: c.b ? t('table_cell_answer') : '' }), (v) => { c.v = v; });
+        input.value = c.v || '';
+        const box = el('input', { type: 'checkbox', title: t('table_cell_blank') });
+        box.checked = !!c.b;
+        const td = el('td', { class: c.b ? 'sci-fill' : '' }, input, el('label', { class: 'sci-cell-check' }, box, ' ', t('table_cell_blank')));
+        box.addEventListener('change', () => {
+          c.b = box.checked;
+          if (!c.b) delete c.b;
+          td.className = box.checked ? 'sci-fill' : '';
+          input.placeholder = box.checked ? t('table_cell_answer') : '';
+        });
+        return td;
+      }), el('td', { class: 'sci-tools' }, s.rows.length > 1
+        ? el('button', { type: 'button', class: 'secondary small', title: t('table_remove_row'), onclick: () => { s.rows.splice(r, 1); render(); } }, '×') : null)));
+      const removeCols = cols > 1 ? el('tr', {}, s.rows[0].map((_, k) => el('td', { class: 'sci-tools' },
+        el('button', { type: 'button', class: 'secondary small', title: t('table_remove_col'), onclick: () => { s.rows.forEach((row) => row.splice(k, 1)); render(); } }, '×'))), el('td')) : null;
+      parts.push(
+        check(t('table_header'), s.header, (v) => { s.header = v; }),
+        check(t('sci_chem'), s.chem, (v) => { s.chem = v; kit.setChem(v); }),
+        check(t('sci_cs'), s.cs, (v) => { s.cs = v; }),
+        el('p', { class: 'muted small' }, t('table_hint')), kit.node,
+        el('div', { class: 'table-scroll' }, el('table', { class: 'sci-table sci-edit' }, el('tbody', {}, body, removeCols))),
+        el('div', { class: 'row', style: 'margin-top:8px' },
+          el('button', { type: 'button', class: 'secondary small', onclick: () => { if (s.rows.length < 30) s.rows.push(s.rows[0].map(() => ({ v: '' }))); render(); } }, t('table_add_row')),
+          el('button', { type: 'button', class: 'secondary small', onclick: () => { if (cols < 10) s.rows.forEach((row) => row.push({ v: '' })); render(); } }, t('table_add_col'))));
+    }
+
     // Критерии оценки (рубрика) открытого вопроса или кода: баллы вопроса — их сумма.
     function renderRubric(q, parts, points) {
       if (!q.rubric) q.rubric = [];
@@ -263,6 +352,8 @@
         else if (q.kind === 'truefalse') renderTrueFalse(q, i, parts);
         else if (q.kind === 'order') renderOrder(q, parts);
         else if (q.kind === 'code') renderCode(q, parts);
+        else if (q.kind === 'formula') renderFormula(q, parts);
+        else if (q.kind === 'table') renderTable(q, parts);
         else {
           const ref = el('textarea', { rows: 2, style: 'min-height:60px', placeholder: t('reference_placeholder') });
           ref.value = q.reference || '';
@@ -274,6 +365,7 @@
         points.addEventListener('input', () => { q.points = Number(points.value); });
         if (q.kind === 'text' || q.kind === 'code') renderRubric(q, parts, points);
         parts.push(el('label', { class: 'row' }, t('points'), points));
+        if (q.kind === 'formula' || q.kind === 'table') parts.push(el('p', { class: 'muted small', style: 'margin:0' }, t('sci_points_hint')));
         return el('div', { class: 'question' }, parts);
       }));
     }

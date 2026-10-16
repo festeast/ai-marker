@@ -1164,7 +1164,9 @@ begin
         'exams', (select count(*) from exams e where e.teacher_id = u.id),
         'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = u.id),
         'materials', (select count(*) from materials m where m.teacher_id = u.id),
-        'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id))
+        'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id),
+        'aiWeek', (select coalesce(sum(x.cost), 0) from ai_usage x where x.user_id = u.id and x.created_at >= _ai_week_start()),
+        'aiOwnKey', exists (select from ai_accounts x where x.user_id = u.id and x.api_key is not null))
         order by u.created_at desc)
       from auth.users u), '[]'::jsonb));
 end $$;
@@ -1360,3 +1362,116 @@ begin
   delete from bank_questions where id = p_id and teacher_id = auth.uid();
   if not found then raise exception 'not_found'; end if;
 end $$;
+
+-- ---------- Лимит расходов на ИИ и свой ключ OpenRouter ----------
+-- Каждый учитель тратит ключ владельца сайта (секрет OPENROUTER_API_KEY) не больше чем на $2 в неделю
+-- (неделя — с понедельника 00:00 по Алматы). Бесплатные модели стоят $0 и работают без лимита.
+-- Учитель может сохранить свой ключ OpenRouter: тогда его запросы идут за его счёт и лимит не нужен.
+-- Ключ хранится только в базе, браузер его никогда не получает; прочитать его может только функция grade
+-- (роль service_role). Поменять лимит одному учителю (подставьте почту и сумму):
+--   insert into public.ai_accounts (user_id, weekly_limit) select id, 5 from auth.users where email = 'почта'
+--   on conflict (user_id) do update set weekly_limit = excluded.weekly_limit;
+-- Администраторы (таблица admins) работают без лимита.
+create table if not exists public.ai_accounts (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  api_key text,
+  key_hint text,
+  weekly_limit numeric(10,2) check (weekly_limit >= 0),
+  updated_at timestamptz not null default now()
+);
+alter table public.ai_accounts enable row level security;
+
+-- Расход по ключу владельца: одна строка на запрос к ИИ, стоимость в долларах из ответа OpenRouter.
+create table if not exists public.ai_usage (
+  id bigint generated always as identity primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  action text not null default 'grade',
+  model text,
+  cost numeric(12,6) not null default 0 check (cost >= 0)
+);
+create index if not exists ai_usage_user_time on public.ai_usage (user_id, created_at);
+alter table public.ai_usage enable row level security;
+revoke all on public.ai_accounts, public.ai_usage from anon, authenticated;
+
+create or replace function public._ai_week_start() returns timestamptz
+language sql stable as $$
+  select date_trunc('week', now() at time zone 'Asia/Almaty') at time zone 'Asia/Almaty'
+$$;
+
+create or replace function public._ai_week_spent(p_user uuid) returns numeric
+language sql stable security definer set search_path = public as $$
+  select coalesce(sum(cost), 0) from ai_usage where user_id = p_user and created_at >= _ai_week_start()
+$$;
+
+-- Лимит на неделю в долларах; null — без лимита (администратор).
+create or replace function public._ai_limit(p_user uuid) returns numeric
+language sql stable security definer set search_path = public as $$
+  select case when exists (select from admins where user_id = p_user) then null
+    else coalesce((select weekly_limit from ai_accounts where user_id = p_user), 2.00) end
+$$;
+
+create or replace function public._ai_status(p_user uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'ownKey', coalesce(a.api_key is not null, false),
+    'keyHint', a.key_hint,
+    'spentWeek', round(_ai_week_spent(p_user), 4),
+    'limit', _ai_limit(p_user),
+    'weekStart', _ai_week_start(),
+    'resetsAt', _ai_week_start() + interval '7 days')
+  from (select 1) one left join ai_accounts a on a.user_id = p_user
+$$;
+
+revoke execute on function public._ai_week_start(), public._ai_week_spent(uuid), public._ai_limit(uuid), public._ai_status(uuid)
+  from public, anon, authenticated;
+
+-- Учитель: сколько потрачено на этой неделе, лимит и есть ли свой ключ (сам ключ не отдаём).
+create or replace function public.ai_status() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return _ai_status(auth.uid());
+end $$;
+
+-- Учитель удаляет свой ключ: дальше снова работает ключ сайта с недельным лимитом.
+create or replace function public.remove_ai_key() returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  update ai_accounts set api_key = null, key_hint = null, updated_at = now() where user_id = auth.uid();
+  return _ai_status(auth.uid());
+end $$;
+
+-- Только для функции grade (service_role): ключ учителя и его остаток.
+create or replace function public.ai_account(p_user uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select _ai_status(p_user) || jsonb_build_object('apiKey', (select api_key from ai_accounts where user_id = p_user))
+$$;
+
+-- Только для функции grade: сохранить ключ учителя (функция сначала проверяет его в OpenRouter).
+create or replace function public.ai_save_key(p_user uuid, p_key text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare k text := nullif(btrim(p_key), '');
+begin
+  if k is null or length(k) > 300 then raise exception 'ai_bad_own_key'; end if;
+  insert into ai_accounts (user_id, api_key, key_hint, updated_at) values (p_user, k, right(k, 4), now())
+  on conflict (user_id) do update set api_key = excluded.api_key, key_hint = excluded.key_hint, updated_at = now();
+  return _ai_status(p_user);
+end $$;
+
+-- Только для функции grade: записать стоимость запроса по ключу сайта.
+create or replace function public.ai_add_usage(p_user uuid, p_action text, p_model text, p_cost numeric) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into ai_usage (user_id, action, model, cost) values (p_user, left(coalesce(p_action, 'grade'), 40), left(p_model, 200), greatest(coalesce(p_cost, 0), 0));
+  return _ai_status(p_user);
+end $$;
+
+revoke execute on function public.ai_account(uuid), public.ai_save_key(uuid, text), public.ai_add_usage(uuid, text, text, numeric)
+  from public, anon, authenticated;
+do $do$ begin
+  if exists (select from pg_roles where rolname = 'service_role') then
+    grant execute on function public.ai_account(uuid), public.ai_save_key(uuid, text), public.ai_add_usage(uuid, text, text, numeric) to service_role;
+  end if;
+end $do$;

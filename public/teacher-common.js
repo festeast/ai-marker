@@ -52,13 +52,22 @@ async function refreshAiUsage() {
   const box = document.getElementById('ai-usage');
   try {
     const u = await callFunction('grade', { action: 'usage' });
+    box.classList.remove('away');
+    // Обычный учитель на ключе сайта: сколько из недельного лимита потрачено.
+    if (u.mode === 'shared' && u.limit != null) {
+      box.textContent = `${t('ai_label')}: ${money(u.spentWeek ?? 0)} ${t('ai_of')} ${money(u.limit)} ${t('ai_per_week')}`;
+      box.title = t('ai_limit_hint').replace('{date}', new Date(u.resetsAt).toLocaleDateString(LOCALE));
+      if ((u.spentWeek ?? 0) >= u.limit) box.classList.add('away');
+      box.hidden = false;
+      return;
+    }
     if (u.provider !== 'openrouter' || u.error) { box.hidden = true; return; }
     const parts = [t('ai_spent') + ' ' + money(u.spent ?? 0)];
     if (u.balance != null) parts.push(t('ai_balance') + ' ' + money(u.balance));
     else if (u.freeTier) parts.push(t('ai_free_tier'));
-    box.textContent = t('ai_label') + ': ' + parts.join(' · ');
+    box.textContent = (u.mode === 'own' ? t('ai_label_own') : t('ai_label')) + ': ' + parts.join(' · ');
     // Расход за сегодня — в подсказке, чтобы шапка помещалась в одну строку.
-    box.title = t('ai_usage_hint') + (u.spentToday ? ` (${t('ai_today')} ${money(u.spentToday)})` : '');
+    box.title = (u.mode === 'own' ? t('ai_own_hint') : t('ai_usage_hint')) + (u.spentToday ? ` (${t('ai_today')} ${money(u.spentToday)})` : '');
     box.hidden = false;
   } catch { box.hidden = true; }
 }

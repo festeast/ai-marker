@@ -36,7 +36,7 @@
       const shown = users.filter((u) => !q || [u.email, u.name].some((v) => v && v.toLowerCase().includes(q)));
       const box = document.getElementById('users');
       if (!shown.length) { box.replaceChildren(el('p', { class: 'muted' }, t('nothing_found'))); return; }
-      const head = el('tr', {}, ['#', t('admin_user'), t('admin_registered'), t('admin_last_login'), t('exams_count'), t('admin_students'), t('library_materials')].map((h) => el('th', {}, h)));
+      const head = el('tr', {}, ['#', t('admin_user'), t('admin_registered'), t('admin_last_login'), t('exams_count'), t('admin_students'), t('library_materials'), t('admin_ai_week')].map((h) => el('th', {}, h)));
       const rows = shown.map((u, i) => el('tr', {},
         el('td', { class: 'muted' }, String(i + 1)),
         el('td', {}, el('b', {}, u.name || '—'), u.isAdmin ? el('span', { class: 'badge', style: 'margin-left:6px' }, t('admin_badge')) : null,
@@ -45,7 +45,8 @@
         el('td', {}, dayTime(u.lastSignInAt)),
         el('td', {}, String(u.exams)),
         el('td', {}, String(u.participants)),
-        el('td', {}, String(u.materials))));
+        el('td', {}, String(u.materials)),
+        el('td', {}, u.aiOwnKey ? el('span', { class: 'badge published' }, t('admin_own_key')) : money(u.aiWeek ?? 0))));
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
     }
 

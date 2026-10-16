@@ -582,3 +582,46 @@ reset request.jwt.claim.sub;
 set role anon;
 select pg_temp.expect_error($$ select list_bank() $$, 'unauthorized');
 reset role;
+
+-- ---------- лимит расходов на ИИ и свой ключ ----------
+-- B — обычный учитель (A уже администратор).
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.check((ai_status()->>'limit')::numeric = 2 and (ai_status()->>'spentWeek')::numeric = 0 and not (ai_status()->>'ownKey')::boolean, 'лимит $2, ничего не потрачено');
+select pg_temp.expect_error($$ select ai_account('22222222-2222-2222-2222-222222222222') $$, 'permission denied for function ai_account');
+select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', 'sk-or-x') $$, 'permission denied for function ai_save_key');
+select pg_temp.expect_error($$ select ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'm', -5) $$, 'permission denied for function ai_add_usage');
+select pg_temp.expect_error($$ select * from ai_accounts $$, 'permission denied for table ai_accounts');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check(ai_status()->'limit' = 'null'::jsonb, 'у администратора нет лимита');
+
+-- функция grade (service_role) записывает расходы и ключ
+reset request.jwt.claim.sub;
+set role service_role;
+select ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'anthropic/claude', 1.25);
+select pg_temp.check((ai_add_usage('22222222-2222-2222-2222-222222222222', 'feedback', 'openai/gpt-4o', 0.8)->>'spentWeek')::numeric = 2.05, 'расход за неделю');
+select pg_temp.check((ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'x', -1)->>'spentWeek')::numeric = 2.05, 'отрицательная цена не уменьшает расход');
+reset role;
+insert into ai_usage (user_id, cost, created_at) values ('22222222-2222-2222-2222-222222222222', 9, now() - interval '8 days');
+set role service_role;
+select pg_temp.check((ai_account('22222222-2222-2222-2222-222222222222')->>'spentWeek')::numeric = 2.05, 'прошлая неделя не считается');
+select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->'apiKey' = 'null'::jsonb, 'своего ключа нет');
+select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', '  ') $$, 'ai_bad_own_key');
+select pg_temp.check((ai_save_key('22222222-2222-2222-2222-222222222222', ' sk-or-v1-abcd1234 ')->>'keyHint') = '1234', 'ключ сохранён');
+select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->>'apiKey' = 'sk-or-v1-abcd1234', 'функция видит ключ');
+select pg_temp.check(ai_account('11111111-1111-1111-1111-111111111111')->'apiKey' = 'null'::jsonb, 'ключ B не достаётся A');
+
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select ai_status() as st \gset
+select pg_temp.check((:'st'::jsonb->>'ownKey')::boolean and not (:'st'::jsonb ? 'apiKey'), 'учитель видит, что ключ есть, но не сам ключ');
+select pg_temp.check(not (remove_ai_key()->>'ownKey')::boolean, 'ключ удалён');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check((select (u->>'aiWeek')::numeric from jsonb_array_elements(admin_users()->'users') u
+  where u->>'id' = '22222222-2222-2222-2222-222222222222') = 2.05, 'админ видит расход учителя');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error($$ select ai_status() $$, 'unauthorized');
+reset role;

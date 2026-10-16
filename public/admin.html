@@ -31,12 +31,33 @@
     const day = (v) => v ? new Date(v).toLocaleDateString(LOCALE) : '—';
     const dayTime = (v) => v ? new Date(v).toLocaleString(LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 
+    // Доступ к общему ключу ИИ: администратор разрешает или запрещает его учителю.
+    function aiCell(u) {
+      const ai = u.ai || {};
+      const [text] = aiAccessText(ai);
+      const cell = el('td', {},
+        el('span', { class: 'badge ' + (ai.access === 'ended' ? 'away' : ai.access === 'trial' ? '' : 'published') }, text),
+        ai.ownKey ? el('span', { class: 'badge published', style: 'margin-left:4px' }, t('admin_own_key')) : null,
+        el('br'), el('span', { class: 'muted' }, `${t('admin_ai_spent')}: ${money(ai.spent ?? 0)}`));
+      if (ai.access !== 'admin') {
+        const allowed = ai.access === 'allowed';
+        const btn = el('button', { class: 'secondary small', style: 'margin-top:4px;display:block' }, t(allowed ? 'admin_shared_deny' : 'admin_shared_allow'));
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          try { u.ai = await rpc('admin_set_shared_ai', { p_user: u.id, p_allowed: !allowed }); render(); }
+          catch (err) { btn.disabled = false; document.getElementById('err').textContent = err.message; }
+        });
+        cell.appendChild(btn);
+      }
+      return cell;
+    }
+
     function render() {
       const q = document.getElementById('search').value.trim().toLowerCase();
       const shown = users.filter((u) => !q || [u.email, u.name].some((v) => v && v.toLowerCase().includes(q)));
       const box = document.getElementById('users');
       if (!shown.length) { box.replaceChildren(el('p', { class: 'muted' }, t('nothing_found'))); return; }
-      const head = el('tr', {}, ['#', t('admin_user'), t('admin_registered'), t('admin_last_login'), t('exams_count'), t('admin_students'), t('library_materials')].map((h) => el('th', {}, h)));
+      const head = el('tr', {}, ['#', t('admin_user'), t('admin_registered'), t('admin_last_login'), t('exams_count'), t('admin_students'), t('library_materials'), t('admin_ai')].map((h) => el('th', {}, h)));
       const rows = shown.map((u, i) => el('tr', {},
         el('td', { class: 'muted' }, String(i + 1)),
         el('td', {}, el('b', {}, u.name || '—'), u.isAdmin ? el('span', { class: 'badge', style: 'margin-left:6px' }, t('admin_badge')) : null,
@@ -45,7 +66,8 @@
         el('td', {}, dayTime(u.lastSignInAt)),
         el('td', {}, String(u.exams)),
         el('td', {}, String(u.participants)),
-        el('td', {}, String(u.materials))));
+        el('td', {}, String(u.materials)),
+        aiCell(u)));
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
     }
 

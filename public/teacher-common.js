@@ -48,17 +48,37 @@ document.addEventListener('DOMContentLoaded', ensureHeader);
 
 // Расходы на ИИ (OpenRouter) в шапке. Если функция grade не настроена — ничего не показываем.
 function money(x) { return '$' + Number(x).toFixed(2); }
+// Доступ к общему ключу сайта (ai_status) → короткий текст и подсказка.
+function aiAccessText(s) {
+  if (s.access === 'admin') return [t('ai_shared_allowed'), t('ai_admin_access')];
+  if (s.access === 'allowed') return [t('ai_shared_allowed'), t('ai_shared_hint')];
+  if (s.access === 'trial') {
+    const date = new Date(s.trialEndsAt).toLocaleDateString(LOCALE);
+    return [`${t('ai_trial').replace('{date}', date)} · ${t('ai_trial_left').replace('{spent}', money(s.spent)).replace('{limit}', money(s.trialLimit))}`, t('ai_trial_hint')];
+  }
+  return [t('ai_trial_ended'), t('ai_trial_ended_hint')];
+}
 async function refreshAiUsage() {
   const box = document.getElementById('ai-usage');
   try {
     const u = await callFunction('grade', { action: 'usage' });
+    box.classList.remove('away');
+    // Учитель на общем ключе сайта: пробный период, разрешение администратора или пробный период закончился.
+    if (u.mode === 'shared' && u.access) {
+      const [text, hint] = aiAccessText(u);
+      box.textContent = `${t('ai_label')}: ${text}`;
+      box.title = hint;
+      if (u.access === 'ended') box.classList.add('away');
+      box.hidden = false;
+      return;
+    }
     if (u.provider !== 'openrouter' || u.error) { box.hidden = true; return; }
     const parts = [t('ai_spent') + ' ' + money(u.spent ?? 0)];
     if (u.balance != null) parts.push(t('ai_balance') + ' ' + money(u.balance));
     else if (u.freeTier) parts.push(t('ai_free_tier'));
-    box.textContent = t('ai_label') + ': ' + parts.join(' · ');
+    box.textContent = (u.mode === 'own' ? t('ai_label_own') : t('ai_label')) + ': ' + parts.join(' · ');
     // Расход за сегодня — в подсказке, чтобы шапка помещалась в одну строку.
-    box.title = t('ai_usage_hint') + (u.spentToday ? ` (${t('ai_today')} ${money(u.spentToday)})` : '');
+    box.title = (u.mode === 'own' ? t('ai_own_hint') : t('ai_usage_hint')) + (u.spentToday ? ` (${t('ai_today')} ${money(u.spentToday)})` : '');
     box.hidden = false;
   } catch { box.hidden = true; }
 }

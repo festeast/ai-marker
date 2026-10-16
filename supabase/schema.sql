@@ -1164,7 +1164,8 @@ begin
         'exams', (select count(*) from exams e where e.teacher_id = u.id),
         'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = u.id),
         'materials', (select count(*) from materials m where m.teacher_id = u.id),
-        'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id))
+        'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id),
+        'ai', _ai_status(u.id) - 'keyHint')
         order by u.created_at desc)
       from auth.users u), '[]'::jsonb));
 end $$;
@@ -1360,3 +1361,119 @@ begin
   delete from bank_questions where id = p_id and teacher_id = auth.uid();
   if not found then raise exception 'not_found'; end if;
 end $$;
+
+-- ---------- Пробный период ИИ, доступ к общему ключу и свой ключ OpenRouter ----------
+-- Общий ключ сайта (секрет OPENROUTER_API_KEY) для платных моделей:
+--   • администраторы и учителя, которым администратор разрешил общий ключ (admin.html), — без ограничений;
+--   • новый учитель — пробный период: 14 дней с регистрации и не больше $2 всего;
+--   • после пробного периода платные модели — только со своим ключом OpenRouter (профиль).
+-- Бесплатные модели стоят $0 и работают у всех. Свой ключ хранится только в базе, браузер его не получает;
+-- прочитать его может только функция grade (роль service_role).
+create table if not exists public.ai_accounts (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  api_key text,
+  key_hint text,
+  shared_access boolean not null default false,
+  updated_at timestamptz not null default now()
+);
+alter table public.ai_accounts enable row level security;
+
+-- Расход по общему ключу: одна строка на запрос к ИИ, стоимость в долларах из ответа OpenRouter.
+create table if not exists public.ai_usage (
+  id bigint generated always as identity primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  action text not null default 'grade',
+  model text,
+  cost numeric(12,6) not null default 0 check (cost >= 0)
+);
+create index if not exists ai_usage_user_time on public.ai_usage (user_id, created_at);
+alter table public.ai_usage enable row level security;
+revoke all on public.ai_accounts, public.ai_usage from anon, authenticated;
+
+-- Условия пробного периода.
+create or replace function public._ai_trial_days() returns int language sql immutable as $$ select 14 $$;
+create or replace function public._ai_trial_limit() returns numeric language sql immutable as $$ select 2.00::numeric $$;
+
+-- Доступ к общему ключу для платных моделей:
+-- admin — администратор, allowed — разрешил администратор, trial — пробный период, ended — пробный период закончился.
+create or replace function public._ai_status(p_user uuid) returns jsonb
+language sql stable security definer set search_path = public, auth as $$
+  with s as (
+    select coalesce(a.api_key is not null, false) as own_key, a.key_hint,
+      exists (select from admins where user_id = p_user) as is_admin,
+      coalesce(a.shared_access, false) as allowed,
+      (select created_at from auth.users where id = p_user) + make_interval(days => _ai_trial_days()) as trial_ends,
+      (select coalesce(sum(cost), 0) from ai_usage where user_id = p_user) as spent
+    from (select 1) one left join ai_accounts a on a.user_id = p_user)
+  select jsonb_build_object(
+    'ownKey', own_key, 'keyHint', key_hint,
+    'access', case when is_admin then 'admin' when allowed then 'allowed'
+      when trial_ends > now() and spent < _ai_trial_limit() then 'trial' else 'ended' end,
+    'trialEndsAt', trial_ends, 'trialLimit', _ai_trial_limit(), 'spent', round(spent, 4))
+  from s
+$$;
+
+revoke execute on function public._ai_status(uuid) from public, anon, authenticated;
+
+-- Учитель: доступ к общему ключу, расход и есть ли свой ключ (сам ключ не отдаём).
+create or replace function public.ai_status() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return _ai_status(auth.uid());
+end $$;
+
+-- Учитель удаляет свой ключ.
+create or replace function public.remove_ai_key() returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  update ai_accounts set api_key = null, key_hint = null, updated_at = now() where user_id = auth.uid();
+  return _ai_status(auth.uid());
+end $$;
+
+-- Администратор разрешает или запрещает учителю общий ключ (без пробного периода и лимита).
+create or replace function public.admin_set_shared_ai(p_user uuid, p_allowed boolean) returns jsonb
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if not is_admin() then raise exception 'forbidden'; end if;
+  if not exists (select from auth.users where id = p_user) then raise exception 'not_found'; end if;
+  insert into ai_accounts (user_id, shared_access) values (p_user, coalesce(p_allowed, false))
+  on conflict (user_id) do update set shared_access = excluded.shared_access, updated_at = now();
+  return _ai_status(p_user) - 'keyHint';
+end $$;
+
+-- Только для функции grade (service_role): ключ учителя и доступ к общему ключу.
+create or replace function public.ai_account(p_user uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select _ai_status(p_user) || jsonb_build_object('apiKey', (select api_key from ai_accounts where user_id = p_user))
+$$;
+
+-- Только для функции grade: сохранить ключ учителя (функция сначала проверяет его в OpenRouter).
+create or replace function public.ai_save_key(p_user uuid, p_key text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare k text := nullif(btrim(p_key), '');
+begin
+  if k is null or length(k) > 300 then raise exception 'ai_bad_own_key'; end if;
+  insert into ai_accounts (user_id, api_key, key_hint, updated_at) values (p_user, k, right(k, 4), now())
+  on conflict (user_id) do update set api_key = excluded.api_key, key_hint = excluded.key_hint, updated_at = now();
+  return _ai_status(p_user);
+end $$;
+
+-- Только для функции grade: записать стоимость запроса по общему ключу.
+create or replace function public.ai_add_usage(p_user uuid, p_action text, p_model text, p_cost numeric) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into ai_usage (user_id, action, model, cost) values (p_user, left(coalesce(p_action, 'grade'), 40), left(p_model, 200), greatest(coalesce(p_cost, 0), 0));
+  return _ai_status(p_user);
+end $$;
+
+revoke execute on function public.ai_account(uuid), public.ai_save_key(uuid, text), public.ai_add_usage(uuid, text, text, numeric)
+  from public, anon, authenticated;
+do $do$ begin
+  if exists (select from pg_roles where rolname = 'service_role') then
+    grant execute on function public.ai_account(uuid), public.ai_save_key(uuid, text), public.ai_add_usage(uuid, text, text, numeric) to service_role;
+  end if;
+end $do$;

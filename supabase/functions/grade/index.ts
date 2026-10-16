@@ -8,6 +8,12 @@
 // ANTHROPIC_API_KEY — ключ Anthropic, или OPENROUTER_API_KEY — ключ OpenRouter
 // (бесплатная модель по умолчанию — секрет OPENROUTER_FREE_MODEL,
 // платная по выбору учителя — секрет OPENROUTER_MODEL, вторая платная «ChatGPT 4o» — секрет OPENROUTER_GPT_MODEL).
+//
+// Общий ключ сайта для платных моделей: администраторам и учителям, которым администратор его разрешил, — без
+// ограничений; новому учителю — пробный период (14 дней и не больше $2, стоимость берём из ответа OpenRouter,
+// таблица ai_usage; при ключе ANTHROPIC_API_KEY расход не считается); потом — только свой ключ. Бесплатные модели — у всех.
+// Учитель может сохранить свой ключ OpenRouter ({ action: "set_key", key }): тогда его запросы идут по его ключу.
+// Ключ учителя читаем через RPC ai_account с ключом SUPABASE_SERVICE_ROLE_KEY (Supabase даёт его функции сам).
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { betaZodOutputFormat } from "npm:@anthropic-ai/sdk@0.128.0/helpers/beta/zod";
 import { z } from "npm:zod@4.6.5";
@@ -238,7 +244,25 @@ async function openRouterFreeModels(apiKey: string) {
   return { provider: "openrouter", defaultFree: Deno.env.get("OPENROUTER_FREE_MODEL") || OPENROUTER_FREE_MODEL, models };
 }
 
-async function askOpenRouter<T>(apiKey: string, task: AiTask<T>, content: string, quality: unknown): Promise<AiResult<T>> {
+// Сколько стоил запрос: OpenRouter пишет это в usage.cost; если нет — спрашиваем по id запроса.
+async function openRouterCost(apiKey: string, body: { id?: string; usage?: { cost?: number } } | null): Promise<number> {
+  const cost = Number(body?.usage?.cost);
+  if (Number.isFinite(cost)) return cost;
+  if (!body?.id) return 0;
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const res = await fetch(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(body.id)}`, { headers: { Authorization: `Bearer ${apiKey}` } }).catch(() => null);
+    const g = res?.ok ? await res.json().catch(() => null) : null;
+    const total = Number(g?.data?.total_cost);
+    if (Number.isFinite(total)) return total;
+  }
+  return 0;
+}
+
+// onCost — куда записать стоимость запроса (вызывается, даже если ответ потом не разобрался: деньги уже потрачены).
+// own — ключ учителя: тогда ошибки «нет денег» и «неверный ключ» относятся к его счёту.
+async function askOpenRouter<T>(apiKey: string, task: AiTask<T>, content: string, quality: unknown,
+  onCost?: (cost: number, model: string) => Promise<unknown>, own = false): Promise<AiResult<T>> {
   const { model, paid, strict } = pickModel(quality);
   // Строгую JSON-схему поддерживают не все модели, поэтому для остальных просим JSON словами.
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -247,15 +271,17 @@ async function askOpenRouter<T>(apiKey: string, task: AiTask<T>, content: string
     body: JSON.stringify({
       model,
       max_tokens: 16000,
+      usage: { include: true },
       messages: [{ role: "system", content: strict ? task.system : `${task.system}\n\n${task.jsonInstruction}` }, { role: "user", content }],
       ...(strict ? { response_format: { type: "json_schema", json_schema: { name: task.name, strict: true, schema: z.toJSONSchema(task.schema) } } } : {}),
     }),
   });
   const body = await res.json().catch(() => null);
+  if (res.ok && onCost) await onCost(await openRouterCost(apiKey, body), model).catch(() => {});
   if (!res.ok) {
     const detail = body?.error?.message ?? `HTTP ${res.status}`;
-    if (res.status === 401) return { error: "ai_bad_key", status: 500, detail };
-    if (res.status === 402) return { error: "ai_no_credits", status: 402, detail };
+    if (res.status === 401) return { error: own ? "ai_own_bad_key" : "ai_bad_key", status: own ? 400 : 500, detail };
+    if (res.status === 402) return { error: own ? "ai_own_no_credits" : "ai_no_credits", status: 402, detail };
     if (res.status === 429) return { error: paid ? "ai_busy" : "ai_free_limit", status: 429, detail };
     if (res.status === 404 || (res.status === 400 && /model/i.test(detail))) return { error: "ai_bad_model", status: 400, detail };
     return { error: "ai_failed", status: 502, detail };
@@ -291,11 +317,8 @@ Deno.serve(async (req: Request) => {
 
   const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
   const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
-  if (!anthropicKey && !openRouterKey) return json({ error: "ai_not_configured", detail: "OPENROUTER_API_KEY is not set" }, 500);
 
-  const { action, examId, participantId, quality, lang, materialId, count, examType, wishes } = await req.json().catch(() => ({}));
-  const ask = <T>(task: AiTask<T>, content: string) =>
-    anthropicKey ? askAnthropic(anthropicKey, task, content) : askOpenRouter(openRouterKey!, task, content, quality);
+  const { action, examId, participantId, quality, lang, materialId, count, examType, wishes, key } = await req.json().catch(() => ({}));
 
   // Работаем с базой от имени учителя, который вызвал функцию.
   const authHeader = req.headers.get("Authorization") ?? "";
@@ -304,19 +327,62 @@ Deno.serve(async (req: Request) => {
     global: { headers: { Authorization: authHeader } },
     auth: { persistSession: false },
   });
+  const { data: auth } = await db.auth.getUser(authHeader.replace(/^Bearer /, ""));
+  const userId = auth?.user?.id;
+  if (!userId) return json({ error: "unauthorized" }, 401);
+
+  // Ключ учителя и расход за неделю читает только функция — с сервисным ключом Supabase.
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!serviceKey) return json({ error: "ai_not_configured", detail: "SUPABASE_SERVICE_ROLE_KEY is not set" }, 500);
+  const admin = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey, { auth: { persistSession: false } });
+  const dbError = (e: { message: string; code?: string }) =>
+    json({ error: e.code === "PGRST202" || e.code === "42883" ? "schema_outdated" : e.message }, 400);
+
+  if (action === "set_key") {
+    const k = typeof key === "string" ? key.trim() : "";
+    // Проверяем ключ в OpenRouter до сохранения.
+    const res = k ? await fetch("https://openrouter.ai/api/v1/key", { headers: { Authorization: `Bearer ${k}` } }).catch(() => null) : null;
+    if (!res?.ok) return json({ error: "ai_bad_own_key" }, 400);
+    const { data, error } = await admin.rpc("ai_save_key", { p_user: userId, p_key: k });
+    if (error) return dbError(error);
+    return json(data);
+  }
+
+  const { data: account, error: accountError } = await admin.rpc("ai_account", { p_user: userId });
+  if (accountError) return dbError(accountError);
+  const ownKey: string | null = account.apiKey ?? null;
+  const access: string = account.access;
+  const status = {
+    access, spent: Number(account.spent), trialLimit: Number(account.trialLimit), trialEndsAt: account.trialEndsAt,
+    ownKey: !!ownKey, keyHint: account.keyHint ?? null,
+  };
+
+  if (!ownKey && !anthropicKey && !openRouterKey) return json({ error: "ai_not_configured", detail: "OPENROUTER_API_KEY is not set" }, 500);
+  // Расход по ключу сайта записываем учителю; по своему ключу учитель платит сам, не записываем.
+  const recordCost = (what: string) => async (cost: number, model: string) => {
+    if (cost > 0) await admin.rpc("ai_add_usage", { p_user: userId, p_action: what, p_model: model, p_cost: cost });
+  };
+  const ask = <T>(task: AiTask<T>, content: string) =>
+    ownKey ? askOpenRouter(ownKey, task, content, quality, undefined, true)
+    : anthropicKey ? askAnthropic(anthropicKey, task, content)
+    : askOpenRouter(openRouterKey!, task, content, quality, recordCost(String(action ?? "grade")));
 
   if (action === "usage") {
-    const { data: auth } = await db.auth.getUser(authHeader.replace(/^Bearer /, ""));
-    if (!auth?.user) return json({ error: "unauthorized" }, 401);
-    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic" });
-    return json(await openRouterUsage(openRouterKey));
+    // Свой ключ — его расходы и остаток; администратор — счёт сайта; остальные — пробный период или доступ к общему ключу.
+    if (ownKey) return json({ ...(await openRouterUsage(ownKey)), mode: "own", ...status });
+    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic", mode: access === "admin" ? "owner" : "shared", ...status });
+    if (access === "admin") return json({ ...(await openRouterUsage(openRouterKey)), mode: "owner", ...status });
+    return json({ provider: "openrouter", mode: "shared", ...status });
   }
 
   if (action === "models") {
-    const { data: auth } = await db.auth.getUser(authHeader.replace(/^Bearer /, ""));
-    if (!auth?.user) return json({ error: "unauthorized" }, 401);
-    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic", models: [] });
-    return json(await openRouterFreeModels(openRouterKey));
+    if (!ownKey && (anthropicKey || !openRouterKey)) return json({ provider: "anthropic", models: [] });
+    return json(await openRouterFreeModels(ownKey ?? openRouterKey!));
+  }
+
+  // Платная модель по общему ключу — администраторам, тем, кому разрешил администратор, и на пробном периоде.
+  if (!ownKey && !anthropicKey && access === "ended" && pickModel(quality).paid) {
+    return json({ error: "ai_trial_ended" }, 402);
   }
 
   if (action === "generate") {

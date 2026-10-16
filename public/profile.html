@@ -16,6 +16,20 @@
       <p class="muted" id="who" style="margin:4px 0 0"></p>
     </div>
     <div class="stats" id="stats"></div>
+    <div class="card" id="ai-card">
+      <h2 data-i18n="ai_key_title"></h2>
+      <p id="ai-status"></p>
+      <p class="muted" data-i18n="ai_key_hint"></p>
+      <ol class="muted" style="margin-top:0">
+        <li data-i18n="ai_key_step1"></li><li data-i18n="ai_key_step2"></li><li data-i18n="ai_key_step3"></li>
+      </ol>
+      <div class="row">
+        <input type="password" id="ai-key" autocomplete="off" placeholder="sk-or-v1-…" style="flex:1;min-width:200px">
+        <button id="ai-key-save" data-i18n="save"></button>
+        <button class="secondary" id="ai-key-remove" data-i18n="ai_key_remove" hidden></button>
+      </div>
+      <p class="muted" id="ai-key-msg"></p>
+    </div>
     <div class="card">
       <h2 data-i18n="class_analysis"></h2>
       <p class="muted" data-i18n="class_analysis_hint"></p>
@@ -67,7 +81,44 @@
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
     }
 
+    // Лимит ИИ по ключу сайта и свой ключ OpenRouter. Сам ключ браузер назад не получает — только 4 последних символа.
+    function renderAi(s) {
+      const box = document.getElementById('ai-status');
+      const remove = document.getElementById('ai-key-remove');
+      remove.hidden = !s.ownKey;
+      if (s.ownKey) {
+        box.replaceChildren(el('b', { class: 'ok' }, t('ai_key_active').replace('{hint}', s.keyHint || '')));
+      } else {
+        const [text, hint] = aiAccessText(s);
+        box.replaceChildren(el('b', { class: s.access === 'ended' ? 'error' : '' }, text), el('br'), el('span', { class: 'muted' }, hint));
+      }
+    }
+    async function aiKeyAction(fn, okKey) {
+      const msg = document.getElementById('ai-key-msg');
+      const buttons = [document.getElementById('ai-key-save'), document.getElementById('ai-key-remove')];
+      buttons.forEach((b) => { b.disabled = true; });
+      msg.className = 'muted'; msg.textContent = t('conn_saving');
+      try {
+        renderAi(await fn());
+        document.getElementById('ai-key').value = '';
+        msg.className = 'ok'; msg.textContent = t(okKey);
+        refreshAiUsage();
+      } catch (err) {
+        msg.className = 'error'; msg.textContent = err.message;
+      } finally { buttons.forEach((b) => { b.disabled = false; }); }
+    }
+    document.getElementById('ai-key-save').addEventListener('click', () => {
+      const key = document.getElementById('ai-key').value.trim();
+      if (!key) { const m = document.getElementById('ai-key-msg'); m.className = 'error'; m.textContent = t('err_ai_bad_own_key'); return; }
+      aiKeyAction(() => callFunction('grade', { action: 'set_key', key }), 'ai_key_saved');
+    });
+    document.getElementById('ai-key-remove').addEventListener('click', () => {
+      if (!confirm(t('ai_key_remove_confirm'))) return;
+      aiKeyAction(() => rpc('remove_ai_key'), 'ai_key_removed');
+    });
+
     requireLogin().then(async (user) => {
+      rpc('ai_status').then(renderAi).catch((err) => { document.getElementById('ai-status').textContent = err.message; });
       const name = (user.user_metadata && user.user_metadata.name) || user.email;
       document.getElementById('name').textContent = name;
       document.getElementById('who').textContent = `${user.email} · ${t('member_since')} ${new Date(user.created_at).toLocaleDateString(LOCALE)}`;

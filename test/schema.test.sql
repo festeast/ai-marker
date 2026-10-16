@@ -582,3 +582,57 @@ reset request.jwt.claim.sub;
 set role anon;
 select pg_temp.expect_error($$ select list_bank() $$, 'unauthorized');
 reset role;
+
+-- ---------- пробный период ИИ, общий ключ и свой ключ ----------
+-- B — обычный учитель (A уже администратор).
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.check(ai_status()->>'access' = 'trial' and (ai_status()->>'spent')::numeric = 0 and not (ai_status()->>'ownKey')::boolean, 'новый учитель на пробном периоде');
+select pg_temp.expect_error($$ select ai_account('22222222-2222-2222-2222-222222222222') $$, 'permission denied for function ai_account');
+select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', 'sk-or-x') $$, 'permission denied for function ai_save_key');
+select pg_temp.expect_error($$ select ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'm', 5) $$, 'permission denied for function ai_add_usage');
+select pg_temp.expect_error($$ select * from ai_accounts $$, 'permission denied for table ai_accounts');
+select pg_temp.expect_error($$ select admin_set_shared_ai('22222222-2222-2222-2222-222222222222', true) $$, 'forbidden');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check(ai_status()->>'access' = 'admin', 'администратор без ограничений');
+
+-- функция grade (service_role) записывает расходы и ключ
+reset request.jwt.claim.sub;
+set role service_role;
+select ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'anthropic/claude', 1.25);
+select pg_temp.check((ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'x', -1)->>'spent')::numeric = 1.25, 'отрицательная цена не уменьшает расход');
+select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->>'access' = 'trial', 'до $2 пробный период идёт');
+select pg_temp.check(ai_add_usage('22222222-2222-2222-2222-222222222222', 'feedback', 'openai/gpt-4o', 0.8)->>'access' = 'ended', '$2 потрачено — пробный период закончился');
+select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->'apiKey' = 'null'::jsonb, 'своего ключа нет');
+select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', '  ') $$, 'ai_bad_own_key');
+select pg_temp.check((ai_save_key('22222222-2222-2222-2222-222222222222', ' sk-or-v1-abcd1234 ')->>'keyHint') = '1234', 'ключ сохранён');
+select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->>'apiKey' = 'sk-or-v1-abcd1234', 'функция видит ключ');
+select pg_temp.check(ai_account('11111111-1111-1111-1111-111111111111')->'apiKey' = 'null'::jsonb, 'ключ B не достаётся A');
+reset role;
+
+-- пробный период кончается и по времени
+insert into auth.users (id, email, created_at) values ('33333333-3333-3333-3333-333333333333', 'c@school.kz', now() - interval '15 days');
+set role service_role;
+select pg_temp.check(ai_account('33333333-3333-3333-3333-333333333333')->>'access' = 'ended', 'через 14 дней пробный период закончился');
+reset role;
+
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select ai_status() as st \gset
+select pg_temp.check((:'st'::jsonb->>'ownKey')::boolean and not (:'st'::jsonb ? 'apiKey'), 'учитель видит, что ключ есть, но не сам ключ');
+select pg_temp.check(not (remove_ai_key()->>'ownKey')::boolean, 'ключ удалён');
+-- администратор разрешает общий ключ
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check(admin_set_shared_ai('33333333-3333-3333-3333-333333333333', true)->>'access' = 'allowed', 'админ разрешил общий ключ');
+select pg_temp.expect_error($$ select admin_set_shared_ai('44444444-4444-4444-4444-444444444444', true) $$, 'not_found');
+select admin_users() as au \gset
+select pg_temp.check((select u->'ai'->>'access' from jsonb_array_elements((:'au'::jsonb)->'users') u
+  where u->>'id' = '33333333-3333-3333-3333-333333333333') = 'allowed', 'админ видит доступ');
+select pg_temp.check((select (u->'ai'->>'spent')::numeric from jsonb_array_elements((:'au'::jsonb)->'users') u
+  where u->>'id' = '22222222-2222-2222-2222-222222222222') = 2.05, 'админ видит расход учителя');
+select pg_temp.check(admin_set_shared_ai('33333333-3333-3333-3333-333333333333', false)->>'access' = 'ended', 'админ запретил общий ключ');
+reset role;
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error($$ select ai_status() $$, 'unauthorized');
+reset role;

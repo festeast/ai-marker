@@ -1165,8 +1165,7 @@ begin
         'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = u.id),
         'materials', (select count(*) from materials m where m.teacher_id = u.id),
         'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id),
-        'aiWeek', (select coalesce(sum(x.cost), 0) from ai_usage x where x.user_id = u.id and x.created_at >= _ai_week_start()),
-        'aiOwnKey', exists (select from ai_accounts x where x.user_id = u.id and x.api_key is not null))
+        'ai', _ai_status(u.id) - 'keyHint')
         order by u.created_at desc)
       from auth.users u), '[]'::jsonb));
 end $$;
@@ -1363,25 +1362,23 @@ begin
   if not found then raise exception 'not_found'; end if;
 end $$;
 
--- ---------- Лимит расходов на ИИ и свой ключ OpenRouter ----------
--- Каждый учитель тратит ключ владельца сайта (секрет OPENROUTER_API_KEY) не больше чем на $2 в неделю
--- (неделя — с понедельника 00:00 по Алматы). Бесплатные модели стоят $0 и работают без лимита.
--- Учитель может сохранить свой ключ OpenRouter: тогда его запросы идут за его счёт и лимит не нужен.
--- Ключ хранится только в базе, браузер его никогда не получает; прочитать его может только функция grade
--- (роль service_role). Поменять лимит одному учителю (подставьте почту и сумму):
---   insert into public.ai_accounts (user_id, weekly_limit) select id, 5 from auth.users where email = 'почта'
---   on conflict (user_id) do update set weekly_limit = excluded.weekly_limit;
--- Администраторы (таблица admins) работают без лимита.
+-- ---------- Пробный период ИИ, доступ к общему ключу и свой ключ OpenRouter ----------
+-- Общий ключ сайта (секрет OPENROUTER_API_KEY) для платных моделей:
+--   • администраторы и учителя, которым администратор разрешил общий ключ (admin.html), — без ограничений;
+--   • новый учитель — пробный период: 14 дней с регистрации и не больше $2 всего;
+--   • после пробного периода платные модели — только со своим ключом OpenRouter (профиль).
+-- Бесплатные модели стоят $0 и работают у всех. Свой ключ хранится только в базе, браузер его не получает;
+-- прочитать его может только функция grade (роль service_role).
 create table if not exists public.ai_accounts (
   user_id uuid primary key references auth.users(id) on delete cascade,
   api_key text,
   key_hint text,
-  weekly_limit numeric(10,2) check (weekly_limit >= 0),
+  shared_access boolean not null default false,
   updated_at timestamptz not null default now()
 );
 alter table public.ai_accounts enable row level security;
 
--- Расход по ключу владельца: одна строка на запрос к ИИ, стоимость в долларах из ответа OpenRouter.
+-- Расход по общему ключу: одна строка на запрос к ИИ, стоимость в долларах из ответа OpenRouter.
 create table if not exists public.ai_usage (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -1394,39 +1391,32 @@ create index if not exists ai_usage_user_time on public.ai_usage (user_id, creat
 alter table public.ai_usage enable row level security;
 revoke all on public.ai_accounts, public.ai_usage from anon, authenticated;
 
-create or replace function public._ai_week_start() returns timestamptz
-language sql stable as $$
-  select date_trunc('week', now() at time zone 'Asia/Almaty') at time zone 'Asia/Almaty'
-$$;
+-- Условия пробного периода.
+create or replace function public._ai_trial_days() returns int language sql immutable as $$ select 14 $$;
+create or replace function public._ai_trial_limit() returns numeric language sql immutable as $$ select 2.00::numeric $$;
 
-create or replace function public._ai_week_spent(p_user uuid) returns numeric
-language sql stable security definer set search_path = public as $$
-  select coalesce(sum(cost), 0) from ai_usage where user_id = p_user and created_at >= _ai_week_start()
-$$;
-
--- Лимит на неделю в долларах; null — без лимита (администратор).
-create or replace function public._ai_limit(p_user uuid) returns numeric
-language sql stable security definer set search_path = public as $$
-  select case when exists (select from admins where user_id = p_user) then null
-    else coalesce((select weekly_limit from ai_accounts where user_id = p_user), 2.00) end
-$$;
-
+-- Доступ к общему ключу для платных моделей:
+-- admin — администратор, allowed — разрешил администратор, trial — пробный период, ended — пробный период закончился.
 create or replace function public._ai_status(p_user uuid) returns jsonb
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = public, auth as $$
+  with s as (
+    select coalesce(a.api_key is not null, false) as own_key, a.key_hint,
+      exists (select from admins where user_id = p_user) as is_admin,
+      coalesce(a.shared_access, false) as allowed,
+      (select created_at from auth.users where id = p_user) + make_interval(days => _ai_trial_days()) as trial_ends,
+      (select coalesce(sum(cost), 0) from ai_usage where user_id = p_user) as spent
+    from (select 1) one left join ai_accounts a on a.user_id = p_user)
   select jsonb_build_object(
-    'ownKey', coalesce(a.api_key is not null, false),
-    'keyHint', a.key_hint,
-    'spentWeek', round(_ai_week_spent(p_user), 4),
-    'limit', _ai_limit(p_user),
-    'weekStart', _ai_week_start(),
-    'resetsAt', _ai_week_start() + interval '7 days')
-  from (select 1) one left join ai_accounts a on a.user_id = p_user
+    'ownKey', own_key, 'keyHint', key_hint,
+    'access', case when is_admin then 'admin' when allowed then 'allowed'
+      when trial_ends > now() and spent < _ai_trial_limit() then 'trial' else 'ended' end,
+    'trialEndsAt', trial_ends, 'trialLimit', _ai_trial_limit(), 'spent', round(spent, 4))
+  from s
 $$;
 
-revoke execute on function public._ai_week_start(), public._ai_week_spent(uuid), public._ai_limit(uuid), public._ai_status(uuid)
-  from public, anon, authenticated;
+revoke execute on function public._ai_status(uuid) from public, anon, authenticated;
 
--- Учитель: сколько потрачено на этой неделе, лимит и есть ли свой ключ (сам ключ не отдаём).
+-- Учитель: доступ к общему ключу, расход и есть ли свой ключ (сам ключ не отдаём).
 create or replace function public.ai_status() returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 begin
@@ -1434,7 +1424,7 @@ begin
   return _ai_status(auth.uid());
 end $$;
 
--- Учитель удаляет свой ключ: дальше снова работает ключ сайта с недельным лимитом.
+-- Учитель удаляет свой ключ.
 create or replace function public.remove_ai_key() returns jsonb
 language plpgsql security definer set search_path = public as $$
 begin
@@ -1443,7 +1433,19 @@ begin
   return _ai_status(auth.uid());
 end $$;
 
--- Только для функции grade (service_role): ключ учителя и его остаток.
+-- Администратор разрешает или запрещает учителю общий ключ (без пробного периода и лимита).
+create or replace function public.admin_set_shared_ai(p_user uuid, p_allowed boolean) returns jsonb
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if not is_admin() then raise exception 'forbidden'; end if;
+  if not exists (select from auth.users where id = p_user) then raise exception 'not_found'; end if;
+  insert into ai_accounts (user_id, shared_access) values (p_user, coalesce(p_allowed, false))
+  on conflict (user_id) do update set shared_access = excluded.shared_access, updated_at = now();
+  return _ai_status(p_user) - 'keyHint';
+end $$;
+
+-- Только для функции grade (service_role): ключ учителя и доступ к общему ключу.
 create or replace function public.ai_account(p_user uuid) returns jsonb
 language sql stable security definer set search_path = public as $$
   select _ai_status(p_user) || jsonb_build_object('apiKey', (select api_key from ai_accounts where user_id = p_user))
@@ -1460,7 +1462,7 @@ begin
   return _ai_status(p_user);
 end $$;
 
--- Только для функции grade: записать стоимость запроса по ключу сайта.
+-- Только для функции grade: записать стоимость запроса по общему ключу.
 create or replace function public.ai_add_usage(p_user uuid, p_action text, p_model text, p_cost numeric) returns jsonb
 language plpgsql security definer set search_path = public as $$
 begin

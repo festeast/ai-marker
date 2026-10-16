@@ -88,13 +88,9 @@
       remove.hidden = !s.ownKey;
       if (s.ownKey) {
         box.replaceChildren(el('b', { class: 'ok' }, t('ai_key_active').replace('{hint}', s.keyHint || '')));
-      } else if (s.limit == null) {
-        box.replaceChildren(el('b', {}, t('ai_no_limit')));
       } else {
-        const over = Number(s.spentWeek) >= Number(s.limit);
-        box.replaceChildren(
-          el('b', { class: over ? 'error' : '' }, `${money(s.spentWeek)} ${t('ai_of')} ${money(s.limit)} ${t('ai_per_week')}`),
-          el('span', { class: 'muted' }, ' · ' + t('ai_resets').replace('{date}', new Date(s.resetsAt).toLocaleDateString(LOCALE))));
+        const [text, hint] = aiAccessText(s);
+        box.replaceChildren(el('b', { class: s.access === 'ended' ? 'error' : '' }, text), el('br'), el('span', { class: 'muted' }, hint));
       }
     }
     async function aiKeyAction(fn, okKey) {

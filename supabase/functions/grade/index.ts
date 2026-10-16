@@ -9,8 +9,9 @@
 // (бесплатная модель по умолчанию — секрет OPENROUTER_FREE_MODEL,
 // платная по выбору учителя — секрет OPENROUTER_MODEL, вторая платная «ChatGPT 4o» — секрет OPENROUTER_GPT_MODEL).
 //
-// Лимит: по ключу сайта каждый учитель тратит не больше $2 в неделю (таблица ai_usage, стоимость берём из
-// ответа OpenRouter; при ключе ANTHROPIC_API_KEY расход не считается). Бесплатные модели — без лимита.
+// Общий ключ сайта для платных моделей: администраторам и учителям, которым администратор его разрешил, — без
+// ограничений; новому учителю — пробный период (14 дней и не больше $2, стоимость берём из ответа OpenRouter,
+// таблица ai_usage; при ключе ANTHROPIC_API_KEY расход не считается); потом — только свой ключ. Бесплатные модели — у всех.
 // Учитель может сохранить свой ключ OpenRouter ({ action: "set_key", key }): тогда его запросы идут по его ключу.
 // Ключ учителя читаем через RPC ai_account с ключом SUPABASE_SERVICE_ROLE_KEY (Supabase даёт его функции сам).
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
@@ -350,8 +351,11 @@ Deno.serve(async (req: Request) => {
   const { data: account, error: accountError } = await admin.rpc("ai_account", { p_user: userId });
   if (accountError) return dbError(accountError);
   const ownKey: string | null = account.apiKey ?? null;
-  const limit: number | null = account.limit === null ? null : Number(account.limit);
-  const status = { spentWeek: Number(account.spentWeek), limit, resetsAt: account.resetsAt, ownKey: !!ownKey, keyHint: account.keyHint ?? null };
+  const access: string = account.access;
+  const status = {
+    access, spent: Number(account.spent), trialLimit: Number(account.trialLimit), trialEndsAt: account.trialEndsAt,
+    ownKey: !!ownKey, keyHint: account.keyHint ?? null,
+  };
 
   if (!ownKey && !anthropicKey && !openRouterKey) return json({ error: "ai_not_configured", detail: "OPENROUTER_API_KEY is not set" }, 500);
   // Расход по ключу сайта записываем учителю; по своему ключу учитель платит сам, не записываем.
@@ -364,10 +368,10 @@ Deno.serve(async (req: Request) => {
     : askOpenRouter(openRouterKey!, task, content, quality, recordCost(String(action ?? "grade")));
 
   if (action === "usage") {
-    // Свой ключ — его расходы и остаток; администратор — счёт сайта; остальные — расход за неделю и лимит.
+    // Свой ключ — его расходы и остаток; администратор — счёт сайта; остальные — пробный период или доступ к общему ключу.
     if (ownKey) return json({ ...(await openRouterUsage(ownKey)), mode: "own", ...status });
-    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic", mode: limit === null ? "owner" : "shared", ...status });
-    if (limit === null) return json({ ...(await openRouterUsage(openRouterKey)), mode: "owner", ...status });
+    if (anthropicKey || !openRouterKey) return json({ provider: "anthropic", mode: access === "admin" ? "owner" : "shared", ...status });
+    if (access === "admin") return json({ ...(await openRouterUsage(openRouterKey)), mode: "owner", ...status });
     return json({ provider: "openrouter", mode: "shared", ...status });
   }
 
@@ -376,9 +380,9 @@ Deno.serve(async (req: Request) => {
     return json(await openRouterFreeModels(ownKey ?? openRouterKey!));
   }
 
-  // Платная модель по ключу сайта — только пока не исчерпан недельный лимит.
-  if (!ownKey && !anthropicKey && limit !== null && pickModel(quality).paid && status.spentWeek >= limit) {
-    return json({ error: "ai_week_limit", detail: `$${status.spentWeek.toFixed(2)} / $${limit.toFixed(2)}` }, 402);
+  // Платная модель по общему ключу — администраторам, тем, кому разрешил администратор, и на пробном периоде.
+  if (!ownKey && !anthropicKey && access === "ended" && pickModel(quality).paid) {
+    return json({ error: "ai_trial_ended" }, 402);
   }
 
   if (action === "generate") {

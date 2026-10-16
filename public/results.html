@@ -8,7 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
   <script src="teacher-common.js"></script><script src="code-runner.js"></script>
-  <script src="xlsx-write.js"></script><script src="results-tools.js"></script>
+  <script src="xlsx-write.js"></script><script src="science.js"></script><script src="results-tools.js"></script>
 </head>
 <body>
   <main class="wrap">
@@ -151,6 +151,13 @@
       const comment = el('input', { type: 'text', placeholder: t('comment_placeholder') });
       comment.value = a.comment || '';
       const msg = el('span', { class: 'muted' }, sourceLabel(a.source));
+      // formula и table: учитель или ИИ поменяли балл — можно вернуть автоматический.
+      const reset = a.auto !== undefined && a.source && a.source !== 'auto' ? el('button', { class: 'secondary small', onclick: async () => {
+        try {
+          await rpc('set_grade', { p_participant_id: p.id, p_question_id: q.id, p_score: null });
+          await load();
+        } catch (err) { msg.className = 'error'; msg.textContent = err.message; }
+      } }, '↺ ' + t('sci_reset_auto')) : null;
       const save = el('button', { class: 'small', onclick: async () => {
         msg.className = 'muted'; msg.textContent = '';
         try {
@@ -163,12 +170,12 @@
       return el('div', {},
         q.rubric && q.rubric.length
           ? [el('div', { style: 'margin-top:8px' }, inputs.node), el('div', { class: 'row', style: 'margin-top:8px' }, save, msg)]
-          : el('div', { class: 'row', style: 'margin-top:8px' }, inputs.node, save, msg),
+          : el('div', { class: 'row', style: 'margin-top:8px' }, inputs.node, save, reset, msg),
         el('div', { style: 'margin-top:6px' }, comment));
     }
 
     function renderStudents() {
-      const hasText = data.questions.some((q) => ['text', 'code'].includes(q.kind || 'text'));
+      const hasText = data.questions.some((q) => ['text', 'code', 'formula', 'table'].includes(q.kind || 'text'));
       document.getElementById('students').replaceChildren(...data.participants.map((p) => {
         const items = studentQuestions(data, p).map((q) => {
           const i = data.questions.indexOf(q);
@@ -190,6 +197,8 @@
             parts.push(a.value ? el('pre', { class: 'code-view' }, a.value) : el('p', { class: 'muted' }, t('no_answer')));
             if (q.reference) parts.push(el('details', {}, el('summary', { class: 'muted' }, t('code_reference')), el('pre', { class: 'code-view' }, q.reference)));
             parts.push(gradeForm(p, q, a));
+          } else if (kind === 'formula' || kind === 'table') {
+            parts.push(Sci.resultView(q, a.value), gradeForm(p, q, a));
           } else if (kind !== 'text') {
             const chosen = a.value !== undefined && a.value !== null && a.value !== '' ? q.options[Number(a.value)] : null;
             const ok = a.value === String(q.correctIndex);
@@ -506,7 +515,7 @@
       document.getElementById('meta-summary').textContent = [meta, data.materials.length ? `${t('exam_materials')}: ${data.materials.length}` : ''].filter(Boolean).join(' · ');
       const anySubmitted = data.participants.some((p) => p.submittedAt);
       document.getElementById('ai-box').hidden = !anySubmitted;
-      document.getElementById('ai-grade-box').hidden = !data.questions.some((q) => q.kind === 'text' || q.kind === 'code');
+      document.getElementById('ai-grade-box').hidden = !data.questions.some((q) => ['text', 'code', 'formula', 'table'].includes(q.kind));
       document.getElementById('tests-box').hidden = !data.questions.some((q) => q.kind === 'code' && q.tests && q.tests.length) || !anySubmitted;
     }
 

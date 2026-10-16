@@ -18,7 +18,16 @@ function answerText(data, q, value) {
   const kind = questionKind(data, q);
   if (kind === 'order') return value.split(',').map((k) => q.options[Number(k)] ?? '?').join(' → ');
   if (kind === 'choice' || kind === 'truefalse') return q.options[Number(value)] ?? value;
+  if (kind === 'formula' || kind === 'table') return Sci.answerText(q, value);
   return value;
+}
+
+// Неверный ли ответ на вопрос с автопроверкой (formula и table — неполный автоматический балл).
+function wrongAnswer(data, q, a) {
+  if (!a || !a.value) return false;
+  const kind = questionKind(data, q);
+  if (kind === 'formula' || kind === 'table') return Number(a.auto ?? 0) < q.points;
+  return a.value !== (kind === 'order' ? q.options.map((_, k) => k).join(',') : String(q.correctIndex));
 }
 
 // ---------- Баллы: общий или по критериям рубрики ----------
@@ -183,8 +192,7 @@ function findSuspiciousPairs(data) {
         }
       }
     } else {
-      const correct = kind === 'order' ? q.options.map((_, k) => k).join(',') : String(q.correctIndex);
-      const wrong = students.filter((p) => owns(p, q) && p.answers[q.id] && p.answers[q.id].value && p.answers[q.id].value !== correct);
+      const wrong = students.filter((p) => owns(p, q) && wrongAnswer(data, q, p.answers[q.id]));
       for (let i = 0; i < wrong.length; i++) {
         for (let j = i + 1; j < wrong.length; j++) {
           if (wrong[i].answers[q.id].value === wrong[j].answers[q.id].value) pairOf(wrong[i], wrong[j]).wrong.push(qi);
@@ -197,9 +205,7 @@ function findSuspiciousPairs(data) {
   const wrongCount = new Map(students.map((p) => [p.id, data.questions.filter((q) => {
     const kind = questionKind(data, q);
     if (kind === 'text' || kind === 'code' || !owns(p, q)) return false;
-    const a = p.answers[q.id];
-    const correct = kind === 'order' ? q.options.map((_, k) => k).join(',') : String(q.correctIndex);
-    return a && a.value && a.value !== correct;
+    return wrongAnswer(data, q, p.answers[q.id]);
   }).length]));
 
   return [...pairs.values()].map((x) => {
@@ -240,14 +246,18 @@ function answerGroups(data, q) {
   const students = data.participants.filter((p) => p.submittedAt && (!p.questionIds || p.questionIds.includes(q.id)));
   const exact = new Map();
   for (const p of students) {
-    const value = (p.answers[q.id] && p.answers[q.id].value) || '';
-    const key = questionKind(data, q) === 'code' ? value.replace(/\s+/g, ' ').trim() : normAnswer(value);
+    const kind = questionKind(data, q);
+    const sci = kind === 'formula' || kind === 'table';
+    const raw = (p.answers[q.id] && p.answers[q.id].value) || '';
+    const value = sci && raw && !Sci.isEmpty(q, raw) ? Sci.answerText(q, raw) : sci ? '' : raw;
+    const key = kind === 'code' ? value.replace(/\s+/g, ' ').trim() : sci ? Sci.norm(value, true) : normAnswer(value);
     if (!exact.has(key)) exact.set(key, { key, members: [] });
     exact.get(key).members.push({ p, value });
   }
   const groups = [];
   for (const g of [...exact.values()].sort((a, b) => b.members.length - a.members.length)) {
-    const near = g.key && g.key.length <= 300 && questionKind(data, q) !== 'code'
+    // Формулы не склеиваем: H₂SO₄ и H₂SO₃ похожи, но это разные ответы.
+    const near = g.key && g.key.length <= 300 && !['code', 'formula', 'table'].includes(questionKind(data, q))
       ? groups.find((x) => x.key && x.key.length <= 300 && diceSimilarity(x.key, g.key) >= 0.8) : null;
     if (near) near.members.push(...g.members);
     else groups.push(g);
@@ -258,7 +268,7 @@ function answerGroups(data, q) {
 
 // box — контейнер; state.questionId — выбранный вопрос; onSaved — перезагрузить страницу.
 function renderGrouping(box, data, state, onSaved) {
-  const qs = data.questions.filter((q) => ['text', 'code'].includes(questionKind(data, q)));
+  const qs = data.questions.filter((q) => ['text', 'code', 'formula', 'table'].includes(questionKind(data, q)));
   if (!qs.length || !data.participants.some((p) => p.submittedAt)) { box.closest('details').hidden = true; return; }
   box.closest('details').hidden = false;
   if (!qs.some((q) => q.id === state.questionId)) state.questionId = qs[0].id;
@@ -315,6 +325,7 @@ function renderGrouping(box, data, state, onSaved) {
     el('p', { class: 'muted' }, t('group_intro')),
     el('label', { class: 'row' }, select),
     rubricView(q), q.reference ? el('p', { class: 'muted' }, `${t('reference')}: ${q.reference}`) : null,
+    q.spec ? el('pre', { class: 'answer-view muted' }, `${t('correct_answer')}: ${Sci.correctText(q)}`) : null,
     el('p', { class: 'muted small' }, t('group_count').replace('{groups}', groups.length).replace('{n}', groups.reduce((s, g) => s + g.members.length, 0))),
     ...cards].filter(Boolean));
 }

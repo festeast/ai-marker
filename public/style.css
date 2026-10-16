@@ -252,3 +252,26 @@ details.copy-pair summary { cursor: pointer; }
 .bank-item label { margin: 0; color: var(--text); font-size: 15px; display: flex; gap: 8px; align-items: flex-start; }
 .bank-item.disabled { opacity: .55; }
 .bank-item > button { width: auto; justify-self: end; }
+
+/* Формулы, реакции и «Заполни таблицу» (science.js) */
+.sci-bar { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 4px; }
+.sci-bar button { min-width: 36px; padding: 4px 8px; font-size: 15px; }
+.sci-bar button.on { background: var(--accent); color: var(--accent-ink); }
+.sci-hint { margin: 0 0 6px; }
+input.sci-input, input.sci-blank, input.sci-cell { font-size: 17px; }
+.sci-formula { font-size: 18px; line-height: 2.4; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 4px; }
+.sci-formula span { white-space: pre-wrap; }
+input.sci-blank { width: 5ch; min-width: 3ch; max-width: 100%; padding: 4px 6px; border: 1px solid var(--accent); border-radius: 6px; background: #fff; font: inherit; text-align: center; }
+.sci-box { display: inline-block; width: 3ch; height: 1.3em; border: 1px dashed var(--accent); border-radius: 4px; vertical-align: middle; }
+.sci-preview { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; min-height: 2.4em; }
+.sci-ans { font-weight: 600; padding: 0 4px; border-radius: 4px; }
+.sci-ans.ok { background: #dcf3e5; }
+.sci-ans.error { background: #fde2e2; color: var(--bad); margin-top: 0; }
+table.sci-table { width: auto; min-width: 50%; border: 1px solid var(--line); }
+table.sci-table td, table.sci-table th { border: 1px solid var(--line); padding: 6px 8px; vertical-align: middle; color: var(--text); font-size: 15px; }
+table.sci-table th { background: var(--bg); font-weight: 600; }
+table.sci-table td.sci-fill, table.sci-table th.sci-fill { background: #eef3ff; }
+input.sci-cell { width: 100%; min-width: 8ch; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+table.sci-edit td { min-width: 120px; }
+table.sci-edit td.sci-tools { min-width: 0; border: none; background: none; }
+.sci-cell-check { margin: 4px 0 0; font-size: 12px; white-space: nowrap; }

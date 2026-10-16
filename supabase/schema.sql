@@ -52,14 +52,17 @@ alter table public.questions add column if not exists reference text;
 --   order     — расставить по порядку (options в верном порядке, ответ — индексы через запятую);
 --   text      — открытый ответ, оценивает учитель или ИИ;
 --   code      — программа на Python или Java (code_lang): запускается в браузере,
---               оценивают тесты учителя (tests), ИИ или сам учитель.
+--               оценивают тесты учителя (tests), ИИ или сам учитель;
+--   formula   — формула или реакция (химия, физика, биология) с индексами: вписать пропуски
+--               или написать целиком (spec); проверяется автоматически, учитель или ИИ могут исправить балл;
+--   table     — «Заполни таблицу»: часть ячеек пустые (spec), проверка как у formula.
 alter table public.questions add column if not exists kind text;
 update public.questions q set kind = case when e.type = 'text' then 'text' else 'choice' end
   from public.exams e where e.id = q.exam_id and q.kind is null;
 alter table public.questions alter column kind set default 'choice';
 alter table public.questions alter column kind set not null;
 alter table public.questions drop constraint if exists questions_kind_check;
-alter table public.questions add constraint questions_kind_check check (kind in ('choice', 'truefalse', 'order', 'text', 'code'));
+alter table public.questions add constraint questions_kind_check check (kind in ('choice', 'truefalse', 'order', 'text', 'code', 'formula', 'table'));
 -- Добавлено позже: вопросы с кодом. code_lang — python | java; starter — заготовка кода для ученика;
 -- tests — [{ "input": "...", "output": "..." }]: что подать на вход и что программа должна вывести (ученик их не видит).
 alter table public.questions add column if not exists code_lang text;
@@ -68,6 +71,15 @@ alter table public.questions add column if not exists tests jsonb;
 -- Добавлено позже: критерии оценки (рубрика) открытого вопроса или кода:
 -- [{ "text": "Названа главная мысль", "points": 2 }, ...]; баллы вопроса = сумма баллов критериев.
 alter table public.questions add column if not exists rubric jsonb;
+-- Добавлено позже: устройство вопроса formula или table (верные ответы внутри, ученику уходит без них):
+--   formula, пропуски: { "mode": "blanks", "template": "2H₂ + [O₂] → 2H₂O", "chem": true, "cs": true }
+--            — в [скобках] то, что вписывает ученик; варианты верного ответа через | ([O₂|O2]);
+--   formula, целиком:  { "mode": "full", "answers": ["2H₂ + O₂ → 2H₂O"], "chem": true, "cs": true };
+--   table:             { "rows": [[{"v": "Вещество"}, {"v": "Формула"}], [{"v": "Вода"}, {"v": "H₂O", "b": true}]],
+--                        "header": true, "chem": false, "cs": false } — b: ячейку заполняет ученик, v — верный ответ.
+-- chem — цифры после букв сами становятся индексами (H2O → H₂O), cs — учитывать регистр (Co ≠ CO).
+-- Ответ ученика: для пропусков и таблицы — JSON-массив строк по порядку, для «целиком» — сама строка.
+alter table public.questions add column if not exists spec jsonb;
 
 create table if not exists public.participants (
   id bigint generated always as identity primary key,
@@ -190,7 +202,8 @@ language sql stable as $$
       'reference', case when p_with_answers then q.reference end,
       'rubric', case when p_with_answers then q.rubric end,
       'lang', q.code_lang, 'starter', q.starter,
-      'tests', case when p_with_answers then q.tests end))
+      'tests', case when p_with_answers then q.tests end,
+      'spec', case when p_with_answers then q.spec end))
     order by q.position), '[]'::jsonb)
   from public.questions q where q.exam_id = p_exam_id
 $$;
@@ -211,20 +224,135 @@ language sql stable security definer set search_path = public as $$
   where q.exam_id = p.exam_id and (e.pick_count is null or q.id = any(_picked_ids(e, p.token::text)))
 $$;
 
+-- ---------- Формулы и таблицы: сравнение ответов ----------
+-- Приводит запись к виду для сравнения: без пробелов, стрелки (->, =, ⟶) — «→», равновесие (<=>, ⇄) — «⇌»,
+-- знаки умножения — «·», десятичная запятая — точка, без учёта регистра, если cs = false.
+-- Слагаемые между «+» в каждой части реакции сортируются: «O₂ + 2H₂» = «2H₂ + O₂».
+-- Тот же алгоритм — Sci.norm в public/science.js; менять оба вместе.
+create or replace function public._sci_norm(s text, cs boolean) returns text
+language plpgsql immutable as $$
+declare
+  v text := coalesce(s, '');
+  res text := '';
+  terms text[] := '{}';
+  cur text := '';
+  depth int := 0;
+  ch text;
+begin
+  v := translate(v, '−–', '--');
+  v := replace(replace(v, '<->', '⇌'), '<=>', '⇌');
+  v := translate(v, '⇄↔', '⇌⇌');
+  v := replace(replace(replace(v, '-->', '→'), '->', '→'), '=>', '→');
+  v := translate(v, '⟶⇒=', '→→→');
+  v := translate(v, '*×⋅∙', '····');
+  v := regexp_replace(v, '(\d),(?=\d)', '\1.', 'g');
+  v := regexp_replace(v, '\s+', '', 'g');
+  if not coalesce(cs, false) then v := replace(lower(v), 'ё', 'е'); end if;
+  for i in 1 .. length(v) loop
+    ch := substr(v, i, 1);
+    if ch in ('(', '[', '{') then depth := depth + 1;
+    elsif ch in (')', ']', '}') then depth := greatest(depth - 1, 0); end if;
+    if depth = 0 and ch in ('→', '⇌') then
+      res := res || (select string_agg(x, '+' order by x collate "C") from unnest(array_append(terms, cur)) x) || ch;
+      terms := '{}'; cur := '';
+    elsif depth = 0 and ch = '+' then
+      terms := array_append(terms, cur); cur := '';
+    else
+      cur := cur || ch;
+    end if;
+  end loop;
+  return res || (select string_agg(x, '+' order by x collate "C") from unnest(array_append(terms, cur)) x);
+end $$;
+
+-- Совпадает ли ответ ученика с одним из верных (варианты через |).
+create or replace function public._sci_match(expected text, given text, cs boolean) returns boolean
+language sql immutable as $$
+  select _sci_norm(given, cs) <> ''
+     and exists (select 1 from unnest(string_to_array(coalesce(expected, ''), '|')) a where _sci_norm(a, cs) = _sci_norm(given, cs))
+$$;
+
+-- Верные ответы пропусков формулы: то, что в [скобках], по порядку.
+create or replace function public._sci_blanks(template text) returns text[]
+language sql immutable as $$
+  select coalesce(array_agg(m[1] order by n), '{}')
+  from regexp_matches(coalesce(template, ''), '\[([^][]*)\]', 'g') with ordinality t(m, n)
+$$;
+
+-- Верные ответы вопроса formula (пропуски) или table по порядку.
+create or replace function public._sci_expected(q public.questions) returns text[]
+language sql immutable as $$
+  select case when q.kind = 'formula' then _sci_blanks(q.spec->>'template')
+    else (select coalesce(array_agg(c.cell->>'v' order by r.rn, c.cn), '{}')
+          from jsonb_array_elements(q.spec->'rows') with ordinality r(rw, rn)
+          cross join lateral jsonb_array_elements(r.rw) with ordinality c(cell, cn)
+          where c.cell->'b' = 'true'::jsonb) end
+$$;
+
+-- Автоматический балл за formula или table: доля верных пропусков или ячеек (с шагом 0.5),
+-- а за формулу целиком — всё или ничего.
+create or replace function public._auto_score(q public.questions, v text) returns numeric
+language plpgsql immutable as $$
+declare
+  cs boolean := coalesce((q.spec->>'cs')::boolean, q.kind = 'formula');
+  exp text[];
+  given jsonb;
+  ok int := 0;
+  n int;
+begin
+  if v is null or q.spec is null or q.kind not in ('formula', 'table') then return 0; end if;
+  if q.kind = 'formula' and q.spec->>'mode' = 'full' then
+    return case when exists (select 1 from jsonb_array_elements_text(q.spec->'answers') a where _sci_match(a, v, cs))
+                then q.points else 0 end;
+  end if;
+  begin
+    given := v::jsonb;
+  exception when others then
+    return 0;
+  end;
+  if jsonb_typeof(given) <> 'array' then return 0; end if;
+  exp := _sci_expected(q);
+  n := coalesce(array_length(exp, 1), 0);
+  if n = 0 then return 0; end if;
+  for i in 1 .. n loop
+    if _sci_match(exp[i], given->>(i - 1), cs) then ok := ok + 1; end if;
+  end loop;
+  return trim_scale(round(q.points * ok * 2.0 / n) / 2);
+end $$;
+
+-- Устройство вопроса formula или table для ученика — без верных ответов.
+create or replace function public._student_spec(q public.questions) returns jsonb
+language sql immutable as $$
+  select case
+    when q.kind = 'formula' and q.spec->>'mode' = 'blanks' then jsonb_strip_nulls(jsonb_build_object(
+      'mode', 'blanks', 'chem', q.spec->'chem',
+      'parts', to_jsonb(regexp_split_to_array(q.spec->>'template', '\[[^][]*\]'))))
+    when q.kind = 'formula' then jsonb_strip_nulls(jsonb_build_object('mode', 'full', 'chem', q.spec->'chem'))
+    when q.kind = 'table' then jsonb_strip_nulls(jsonb_build_object(
+      'header', q.spec->'header', 'chem', q.spec->'chem',
+      'rows', (select jsonb_agg((select jsonb_agg(case when c.cell->'b' = 'true'::jsonb then '{"b": true}'::jsonb else c.cell end order by c.cn)
+                                 from jsonb_array_elements(r.rw) with ordinality c(cell, cn)) order by r.rn)
+               from jsonb_array_elements(q.spec->'rows') with ordinality r(rw, rn))))
+  end
+$$;
+
 -- Верен ли ответ на вопрос с автопроверкой (для открытого вопроса — null).
 create or replace function public._is_correct(q public.questions, v text) returns boolean
 language sql immutable as $$
   select case q.kind
     when 'text' then null
     when 'code' then null
+    when 'formula' then _auto_score(q, v) = q.points
+    when 'table' then _auto_score(q, v) = q.points
     when 'order' then v = (select string_agg(i::text, ',' order by i) from generate_series(0, jsonb_array_length(q.options) - 1) i)
     else v = q.correct_index::text end
 $$;
 
 -- Балл за вопрос: автопроверка или оценка учителя / ИИ (g) для открытого вопроса.
+-- formula и table: оценка учителя или ИИ, если она есть, иначе автоматическая.
 create or replace function public._q_score(q public.questions, v text, g numeric) returns numeric
 language sql immutable as $$
-  select case when q.kind in ('text', 'code') then g when _is_correct(q, v) then q.points else 0 end
+  select case when q.kind in ('text', 'code') then g when q.kind in ('formula', 'table') then coalesce(g, _auto_score(q, v))
+              when _is_correct(q, v) then q.points else 0 end
 $$;
 
 -- Вопросы для ученика: без верных ответов. Варианты приходят как {i, text}, где i — номер
@@ -242,9 +370,9 @@ begin
   for q in select * from questions where exam_id = e.id
              and (e.pick_count is null or id = any(_picked_ids(e, p_seed)))
            order by case when e.shuffle then md5(p_seed || ':q' || id) end, position loop
-    if q.kind in ('text', 'code') or q.options is null then
+    if q.kind in ('text', 'code', 'formula', 'table') or q.options is null then
       res := res || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('id', q.id, 'kind', q.kind, 'text', q.text, 'points', q.points,
-        'lang', q.code_lang, 'starter', q.starter)));
+        'lang', q.code_lang, 'starter', q.starter, 'spec', _student_spec(q))));
       continue;
     end if;
     n := jsonb_array_length(q.options);
@@ -317,6 +445,10 @@ language sql stable security definer set search_path = public as $$
   where participant_id = p_participant_id and type = 'leave'
     and id > coalesce((select max(id) from events where participant_id = p_participant_id and type = 'unlock'), 0)
 $$;
+
+revoke execute on function public._sci_norm(text, boolean), public._sci_match(text, text, boolean), public._sci_blanks(text),
+  public._sci_expected(public.questions), public._auto_score(public.questions, text), public._student_spec(public.questions)
+  from public, anon, authenticated;
 
 revoke execute on function public._is_correct(public.questions, text), public._q_score(public.questions, text, numeric),
   public._student_questions(public.exams, text), public._picked_ids(public.exams, text), public._p_questions(public.participants)
@@ -430,6 +562,64 @@ begin
           from jsonb_array_elements(r) with ordinality t(x, n));
 end $$;
 
+-- Проверяет и очищает spec вопроса formula или table (см. questions.spec). Ошибки: invalid_formula, invalid_table.
+create or replace function public._norm_spec(q jsonb, k text) returns jsonb
+language plpgsql immutable as $$
+declare
+  s jsonb := q->'spec';
+  tpl text;
+  n int;
+  w int;
+  blanks text[];
+begin
+  if jsonb_typeof(s) is distinct from 'object' then
+    raise exception '%', case when k = 'formula' then 'invalid_formula' else 'invalid_table' end;
+  end if;
+  if k = 'formula' then
+    if s->>'mode' = 'blanks' then
+      tpl := trim(coalesce(s->>'template', ''));
+      blanks := _sci_blanks(tpl);
+      if jsonb_typeof(s->'template') <> 'string' or length(tpl) > 2000 or cardinality(blanks) not between 1 and 50
+         or exists (select 1 from unnest(blanks) b where trim(replace(b, '|', '')) = '') then
+        raise exception 'invalid_formula';
+      end if;
+      return jsonb_build_object('mode', 'blanks', 'template', tpl,
+        'chem', coalesce(s->'chem' = 'true'::jsonb, false), 'cs', coalesce(s->'cs' <> 'false'::jsonb, true));
+    elsif s->>'mode' = 'full' then
+      if jsonb_typeof(s->'answers') <> 'array'
+         or exists (select 1 from jsonb_array_elements(s->'answers') a where jsonb_typeof(a) <> 'string' or length(a #>> '{}') > 1000)
+         or (select count(*) from jsonb_array_elements_text(s->'answers') a where trim(a) <> '') not between 1 and 20 then
+        raise exception 'invalid_formula';
+      end if;
+      return jsonb_build_object('mode', 'full',
+        'answers', (select jsonb_agg(trim(a) order by i) from jsonb_array_elements_text(s->'answers') with ordinality t(a, i) where trim(a) <> ''),
+        'chem', coalesce(s->'chem' = 'true'::jsonb, false), 'cs', coalesce(s->'cs' <> 'false'::jsonb, true));
+    end if;
+    raise exception 'invalid_formula';
+  end if;
+  -- table
+  if jsonb_typeof(s->'rows') is distinct from 'array' then raise exception 'invalid_table'; end if;
+  n := jsonb_array_length(s->'rows');
+  w := case when n > 0 and jsonb_typeof(s->'rows'->0) = 'array' then jsonb_array_length(s->'rows'->0) end;
+  if n not between 1 and 30 or w is null or w not between 1 and 10
+     or exists (select 1 from jsonb_array_elements(s->'rows') r where jsonb_typeof(r) <> 'array' or jsonb_array_length(r) <> w
+                or exists (select 1 from jsonb_array_elements(r) c
+                           where jsonb_typeof(c) <> 'object' or (c ? 'v' and jsonb_typeof(c->'v') <> 'string')
+                              or length(c->>'v') > 500
+                              or (c->'b' = 'true'::jsonb and trim(replace(coalesce(c->>'v', ''), '|', '')) = '')))
+     or not exists (select 1 from jsonb_array_elements(s->'rows') r, jsonb_array_elements(r) c where c->'b' = 'true'::jsonb) then
+    raise exception 'invalid_table';
+  end if;
+  return jsonb_build_object(
+    'rows', (select jsonb_agg((select jsonb_agg(case when c->'b' = 'true'::jsonb
+                                                     then jsonb_build_object('v', trim(c->>'v'), 'b', true)
+                                                     else jsonb_build_object('v', trim(coalesce(c->>'v', ''))) end order by cn)
+                               from jsonb_array_elements(r) with ordinality t2(c, cn)) order by rn)
+             from jsonb_array_elements(s->'rows') with ordinality t(r, rn)),
+    'header', coalesce(s->'header' = 'true'::jsonb, false),
+    'chem', coalesce(s->'chem' = 'true'::jsonb, false), 'cs', coalesce(s->'cs' = 'true'::jsonb, false));
+end $$;
+
 -- Проверяет один вопрос из JSON и возвращает его вид (kind). p_type — тип экзамена
 -- (quiz | text | mixed); null — любой вид (банк вопросов).
 create or replace function public._check_question(q jsonb, p_type text) returns text
@@ -445,8 +635,9 @@ begin
     raise exception 'invalid_points';
   end if;
   k := coalesce(q->>'kind', case when p_type = 'text' then 'text' else 'choice' end);
-  if k not in ('choice', 'truefalse', 'order', 'text', 'code')
-     or (p_type = 'quiz' and k in ('text', 'code')) or (p_type = 'text' and k not in ('text', 'code')) then
+  -- formula и table — в экзаменах любого типа
+  if k not in ('choice', 'truefalse', 'order', 'text', 'code', 'formula', 'table')
+     or (p_type = 'quiz' and k in ('text', 'code')) or (p_type = 'text' and k not in ('text', 'code', 'formula', 'table')) then
     raise exception 'invalid_kind';
   end if;
   if k = 'code' then
@@ -462,6 +653,8 @@ begin
   end if;
   if k in ('text', 'code') then
     perform _norm_rubric(q);
+  elsif k in ('formula', 'table') then
+    perform _norm_spec(q, k);
   else
     opts := q->'options';
     if opts is null or jsonb_typeof(opts) <> 'array' or jsonb_array_length(opts) < 2
@@ -481,11 +674,12 @@ begin
 end $$;
 
 -- Поля вопроса для записи в таблицу (общие для экзамена и банка вопросов). Вопрос уже проверен _check_question.
+drop function if exists public._question_fields(jsonb, text);
 create or replace function public._question_fields(q jsonb, k text)
-returns table (options jsonb, correct_index int, points int, reference text, rubric jsonb, code_lang text, starter text, tests jsonb)
+returns table (options jsonb, correct_index int, points int, reference text, rubric jsonb, code_lang text, starter text, tests jsonb, spec jsonb)
 language sql immutable as $$
   select
-    case when k not in ('text', 'code') then (select jsonb_agg(trim(o) order by n) from jsonb_array_elements_text(q->'options') with ordinality t(o, n)) end,
+    case when k in ('choice', 'truefalse', 'order') then (select jsonb_agg(trim(o) order by n) from jsonb_array_elements_text(q->'options') with ordinality t(o, n)) end,
     case when k in ('choice', 'truefalse') then (q->>'correctIndex')::int end,
     case when k in ('text', 'code') and _norm_rubric(q) is not null
          then (select sum((x->>'points')::int) from jsonb_array_elements(_norm_rubric(q)) x)::int
@@ -496,7 +690,8 @@ language sql immutable as $$
     case when k = 'code' then nullif(left(coalesce(q->>'starter', ''), 20000), '') end,
     case when k = 'code' and jsonb_typeof(q->'tests') = 'array' and jsonb_array_length(q->'tests') > 0 then
       (select jsonb_agg(jsonb_build_object('input', coalesce(x->>'input', ''), 'output', x->>'output') order by n)
-       from jsonb_array_elements(q->'tests') with ordinality t(x, n)) end
+       from jsonb_array_elements(q->'tests') with ordinality t(x, n)) end,
+    case when k in ('formula', 'table') then _norm_spec(q, k) end
 $$;
 
 -- Сохраняет название и весь список вопросов черновика целиком.
@@ -525,7 +720,7 @@ begin
   delete from questions where exam_id = e.id;
   for q in select value from jsonb_array_elements(p_questions) loop
     k := _check_question(q, e.type);
-    insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests)
+    insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests, spec)
     select e.id, idx, k, trim(q->>'text'), f.* from _question_fields(q, k) f;
     idx := idx + 1;
   end loop;
@@ -572,8 +767,8 @@ begin
   insert into exams (teacher_id, title, type, class_name, shuffle, strict_mode, max_leaves, tools, tools_sheet, pick_count)
   values (e.teacher_id, left(trim(p_title), 200), e.type, e.class_name, e.shuffle, e.strict_mode, e.max_leaves, e.tools, e.tools_sheet, e.pick_count)
   returning * into c;
-  insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests)
-  select c.id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests
+  insert into questions (exam_id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests, spec)
+  select c.id, position, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests, spec
   from questions where exam_id = e.id order by position;
   insert into exam_materials (exam_id, material_id) select c.id, material_id from exam_materials where exam_id = e.id;
   return _exam_json(c);
@@ -663,7 +858,9 @@ begin
               'score', _q_score(q, a.value, g.score),
               'comment', g.comment,
               'criteria', g.criteria,
-              'source', case when q.kind not in ('text', 'code') then 'auto' else g.source end)))
+              'source', case when q.kind in ('formula', 'table') then coalesce(g.source, 'auto')
+                             when q.kind not in ('text', 'code') then 'auto' else g.source end,
+              'auto', case when q.kind in ('formula', 'table') then _auto_score(q, a.value) end)))
             from _p_questions(p) q
             left join answers a on a.question_id = q.id and a.participant_id = p.id
             left join grades g on g.question_id = q.id and g.participant_id = p.id
@@ -699,6 +896,7 @@ create or replace function public._criteria_sum(c jsonb) returns numeric
 language sql immutable as $$ select (select sum(x::numeric) from jsonb_array_elements_text(c) x) $$;
 
 revoke execute on function public._norm_rubric(jsonb), public._check_question(jsonb, text), public._question_fields(jsonb, text),
+  public._norm_spec(jsonb, text),
   public._clean_criteria(public.questions, jsonb), public._criteria_sum(jsonb)
   from public, anon, authenticated;
 
@@ -720,7 +918,12 @@ begin
   e := _own_exam(p.exam_id);
   select * into q from questions where id = p_question_id and exam_id = e.id;
   if not found then raise exception 'not_found'; end if;
-  if q.kind not in ('text', 'code') then raise exception 'not_gradable'; end if;
+  if q.kind not in ('text', 'code', 'formula', 'table') then raise exception 'not_gradable'; end if;
+  -- formula и table: пустой балл — снова автоматическая проверка
+  if p_score is null and q.kind in ('formula', 'table') then
+    delete from grades where participant_id = p.id and question_id = q.id;
+    return;
+  end if;
   c := _clean_criteria(q, p_criteria);
   if c is not null then p_score := _criteria_sum(c); end if;
   if p_score is null or p_score < 0 or p_score > q.points then raise exception 'invalid_score'; end if;
@@ -740,7 +943,9 @@ declare
   e exams := _own_exam(p_exam_id);
   n int;
 begin
-  if e.type = 'quiz' then raise exception 'not_gradable'; end if;
+  if e.type = 'quiz' and not exists (select 1 from questions where exam_id = e.id and kind in ('formula', 'table')) then
+    raise exception 'not_gradable';
+  end if;
   if p_grades is null or jsonb_typeof(p_grades) <> 'array' then raise exception 'invalid_grades'; end if;
   insert into grades (participant_id, question_id, score, comment, source, criteria, updated_at)
   select p.id, q.id,
@@ -749,7 +954,7 @@ begin
          'ai', c.v, now()
   from jsonb_array_elements(p_grades) g
   join participants p on p.id = (g->>'participantId')::bigint and p.exam_id = e.id
-  join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind in ('text', 'code')
+  join questions q on q.id = (g->>'questionId')::bigint and q.exam_id = e.id and q.kind in ('text', 'code', 'formula', 'table')
   cross join lateral (select _clean_criteria(q, g->'criteria') as v) c
   where jsonb_typeof(g->'score') = 'number' and q.id in (select pq.id from _p_questions(p) pq)
   on conflict (participant_id, question_id) do update
@@ -1288,7 +1493,7 @@ create table if not exists public.bank_questions (
   id bigint generated always as identity primary key,
   teacher_id uuid not null references auth.users(id) on delete cascade,
   topic text,
-  kind text not null check (kind in ('choice', 'truefalse', 'order', 'text', 'code')),
+  kind text not null,
   text text not null,
   options jsonb,
   correct_index int,
@@ -1301,6 +1506,10 @@ create table if not exists public.bank_questions (
   created_at timestamptz not null default now()
 );
 create index if not exists bank_questions_teacher on public.bank_questions(teacher_id, topic);
+alter table public.bank_questions add column if not exists spec jsonb;
+alter table public.bank_questions drop constraint if exists bank_questions_kind_check;
+alter table public.bank_questions add constraint bank_questions_kind_check
+  check (kind in ('choice', 'truefalse', 'order', 'text', 'code', 'formula', 'table'));
 alter table public.bank_questions enable row level security;
 
 create or replace function public._bank_json(b public.bank_questions) returns jsonb
@@ -1308,7 +1517,7 @@ language sql stable as $$
   select jsonb_strip_nulls(jsonb_build_object(
     'id', b.id, 'topic', b.topic, 'kind', b.kind, 'text', b.text, 'options', b.options, 'correctIndex', b.correct_index,
     'points', b.points, 'reference', b.reference, 'rubric', b.rubric, 'lang', b.code_lang, 'starter', b.starter,
-    'tests', b.tests, 'createdAt', b.created_at))
+    'tests', b.tests, 'spec', b.spec, 'createdAt', b.created_at))
 $$;
 revoke execute on function public._bank_json(public.bank_questions) from public, anon, authenticated;
 
@@ -1343,10 +1552,10 @@ begin
     select id into existing from bank_questions where teacher_id = auth.uid() and kind = k and text = trim(q->>'text') limit 1;
     if existing is not null then
       update bank_questions b set topic = t, options = f.options, correct_index = f.correct_index, points = f.points,
-        reference = f.reference, rubric = f.rubric, code_lang = f.code_lang, starter = f.starter, tests = f.tests
+        reference = f.reference, rubric = f.rubric, code_lang = f.code_lang, starter = f.starter, tests = f.tests, spec = f.spec
       from _question_fields(q, k) f where b.id = existing;
     else
-      insert into bank_questions (teacher_id, topic, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests)
+      insert into bank_questions (teacher_id, topic, kind, text, options, correct_index, points, reference, rubric, code_lang, starter, tests, spec)
       select auth.uid(), t, k, trim(q->>'text'), f.* from _question_fields(q, k) f;
     end if;
     n := n + 1;

@@ -636,3 +636,76 @@ reset request.jwt.claim.sub;
 set role anon;
 select pg_temp.expect_error($$ select ai_status() $$, 'unauthorized');
 reset role;
+
+-- ---------- формулы, реакции и «Заполни таблицу» ----------
+select pg_temp.check(_sci_norm('O₂ + 2H₂ -> 2H₂O', true) = _sci_norm('2H₂+O₂ = 2H₂O', true), 'порядок слагаемых и вид стрелки не важны');
+select pg_temp.check(_sci_norm('H₂O', true) <> _sci_norm('H2O', true), 'индекс и обычная цифра — разные записи');
+select pg_temp.check(_sci_norm('Co', true) <> _sci_norm('CO', true) and _sci_norm('Вода', false) = _sci_norm(' вода ', false), 'регистр по настройке');
+select pg_temp.check(_sci_norm('N₂ + 3H₂ <=> 2NH₃', true) = _sci_norm('3H₂+N₂⇄2NH₃', true), 'равновесие');
+select pg_temp.check(_sci_norm('v = 9,8 * t', true) = _sci_norm('v=9.8·t', true), 'запятая и знак умножения');
+select pg_temp.check(_sci_match('O₂|O2', 'O2', true) and not _sci_match('O₂', '', true), 'варианты ответа через |');
+
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select (create_exam('Химия', 'quiz')->>'id')::bigint as sci_id \gset
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Х', '[{"kind":"formula","text":"x","spec":{"mode":"blanks","template":"H2O"}}]') $$, :sci_id), 'invalid_formula');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Х', '[{"kind":"formula","text":"x","spec":{"mode":"full","answers":[" "]}}]') $$, :sci_id), 'invalid_formula');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Х', '[{"kind":"table","text":"x","spec":{"rows":[[{"v":"a"},{"v":"b"}]]}}]') $$, :sci_id), 'invalid_table');
+select pg_temp.expect_error(format($$ select save_exam(%s, 'Х', '[{"kind":"table","text":"x","spec":{"rows":[[{"v":"a"}],[{"v":"b"},{"v":"c","b":true}]]}}]') $$, :sci_id), 'invalid_table');
+select save_exam(:sci_id, 'Химия', '[
+  {"kind":"formula","text":"Допишите реакцию","points":2,"spec":{"mode":"blanks","template":"[2]H₂ + [O₂|O2] → 2H₂O","chem":true}},
+  {"kind":"formula","text":"Напишите реакцию горения метана","points":3,"spec":{"mode":"full","answers":["CH₄ + 2O₂ → CO₂ + 2H₂O"]}},
+  {"kind":"table","text":"Заполните таблицу","points":3,"spec":{"header":true,"rows":[
+    [{"v":"Вещество"},{"v":"Формула"},{"v":"Класс"}],
+    [{"v":"Вода"},{"v":"H₂O","b":true},{"v":"оксид","b":true}],
+    [{"v":"Поваренная соль"},{"v":"NaCl","b":true},{"v":"соль"}]]}}]'::jsonb) as sci \gset
+select pg_temp.check((:'sci'::jsonb)->'questions'->0->'spec'->>'template' = '[2]H₂ + [O₂|O2] → 2H₂O'
+  and ((:'sci'::jsonb)->'questions'->2->'spec'->>'cs')::boolean = false, 'устройство вопросов сохранено');
+select publish_exam(:sci_id)->>'code' as sci_code \gset
+select (q->>'id')::bigint as f_blanks from jsonb_array_elements((:'sci'::jsonb)->'questions') q where q->>'text' = 'Допишите реакцию' \gset
+select (q->>'id')::bigint as f_full from jsonb_array_elements((:'sci'::jsonb)->'questions') q where q->>'text' like 'Напишите%' \gset
+select (q->>'id')::bigint as f_table from jsonb_array_elements((:'sci'::jsonb)->'questions') q where q->>'kind' = 'table' \gset
+
+reset request.jwt.claim.sub;
+set role anon;
+select join_exam(:'sci_code', 'Әлия') as s1 \gset
+select join_exam(:'sci_code', 'Марат') as s2 \gset
+select get_attempt(:'s1') as sa \gset
+select pg_temp.check((:'sa'::jsonb)::text not like '%O2%' and (:'sa'::jsonb)::text not like '%NaCl%' and (:'sa'::jsonb)::text not like '%CO₂%',
+  'ученик не видит верных ответов');
+select pg_temp.check((select q->'spec'->'parts' from jsonb_array_elements((:'sa'::jsonb)->'questions') q where (q->>'id')::bigint = :f_blanks)
+  = '["", "H₂ + ", " → 2H₂O"]'::jsonb, 'пропуски формулы');
+select pg_temp.check((select q->'spec'->'rows'->1 from jsonb_array_elements((:'sa'::jsonb)->'questions') q where (q->>'id')::bigint = :f_table)
+  = '[{"v": "Вода"}, {"b": true}, {"b": true}]'::jsonb, 'пустые ячейки таблицы');
+select submit_attempt(:'s1', jsonb_build_object(:'f_blanks', '["2", "O2"]', :'f_full', '2O₂ + CH₄ = 2H₂O + CO₂', :'f_table', '["H₂O", "Оксид", "NaCl"]'));
+select submit_attempt(:'s2', jsonb_build_object(:'f_blanks', '["1", "O₂"]', :'f_full', 'CH4 + 2O2 -> CO2 + 2H2O', :'f_table', '["H₂O"]'));
+
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select exam_results(:sci_id) as sr \gset
+select pg_temp.check((select (p->>'total')::numeric from jsonb_array_elements((:'sr'::jsonb)->'participants') p where p->>'name' = 'Әлия') = 8,
+  'всё верно — полный балл (порядок, стрелка, регистр в таблице)');
+select pg_temp.check((select (p->'answers'->(:'f_blanks')::text->>'score')::numeric || '/' || (p->'answers'->(:'f_full')::text->>'score')::numeric
+  || '/' || (p->'answers'->(:'f_table')::text->>'score')::numeric
+  from jsonb_array_elements((:'sr'::jsonb)->'participants') p where p->>'name' = 'Марат') = '1/0/1', 'частичный балл за пропуски и ячейки');
+select pg_temp.check((select p->'answers'->(:'f_full')::text->>'source' from jsonb_array_elements((:'sr'::jsonb)->'participants') p
+  where p->>'name' = 'Марат') = 'auto', 'источник — автопроверка');
+select (p->>'id')::bigint as marat from jsonb_array_elements((:'sr'::jsonb)->'participants') p where p->>'name' = 'Марат' \gset
+select set_grade(:marat, :f_full, 2, 'Индексы обычными цифрами');
+select pg_temp.check((select (p->'answers'->(:'f_full')::text->>'score')::numeric = 2 and (p->'answers'->(:'f_full')::text->>'auto')::numeric = 0
+  from jsonb_array_elements(exam_results(:sci_id)->'participants') p where p->>'name' = 'Марат'), 'учитель исправил балл');
+select set_grade(:marat, :f_full, null);
+select pg_temp.check((select (p->'answers'->(:'f_full')::text->>'score')::numeric = 0
+  from jsonb_array_elements(exam_results(:sci_id)->'participants') p where p->>'name' = 'Марат'), 'снова автопроверка');
+select pg_temp.check(save_ai_grades(:sci_id, jsonb_build_array(jsonb_build_object('participantId', :marat, 'questionId', :f_table, 'score', 2, 'comment', 'ok'))) = 1,
+  'ИИ может оценить таблицу даже в тесте');
+select (copy_exam(:sci_id, 'Химия 2')->>'id')::bigint as sci2 \gset
+select pg_temp.check(get_exam(:sci2)->'questions'->2->'spec' = get_exam(:sci_id)->'questions'->2->'spec', 'копия экзамена с таблицей');
+select pg_temp.check(add_to_bank('Химия', get_exam(:sci_id)->'questions') = 3, 'формулы и таблица в банке');
+select pg_temp.check((select b->'spec'->>'mode' from jsonb_array_elements(list_bank()) b where b->>'text' = 'Допишите реакцию') = 'blanks', 'банк хранит устройство');
+select (create_exam('Физика', 'text')->>'id')::bigint as phys_id \gset
+select pg_temp.check(jsonb_array_length(save_exam(:phys_id, 'Физика', '[{"kind":"formula","text":"Второй закон Ньютона","spec":{"mode":"full","answers":["F = ma"]}}]')->'questions') = 1,
+  'формула и в экзамене с открытыми вопросами');
+reset role;
+reset request.jwt.claim.sub;

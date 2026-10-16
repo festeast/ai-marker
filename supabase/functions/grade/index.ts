@@ -14,6 +14,7 @@
 // таблица ai_usage; при ключе ANTHROPIC_API_KEY расход не считается); потом — только свой ключ. Бесплатные модели — у всех.
 // Учитель может сохранить свой ключ OpenRouter ({ action: "set_key", key }): тогда его запросы идут по его ключу.
 // Ключ учителя читаем через RPC ai_account с ключом SUPABASE_SERVICE_ROLE_KEY (Supabase даёт его функции сам).
+// В базе ключ лежит зашифрованным (AES-GCM); пароль шифрования — секрет AI_KEY_SECRET, он есть только у функции.
 import Anthropic from "npm:@anthropic-ai/sdk@0.128.0";
 import { betaZodOutputFormat } from "npm:@anthropic-ai/sdk@0.128.0/helpers/beta/zod";
 import { z } from "npm:zod@4.6.5";
@@ -244,6 +245,30 @@ async function openRouterFreeModels(apiKey: string) {
   return { provider: "openrouter", defaultFree: Deno.env.get("OPENROUTER_FREE_MODEL") || OPENROUTER_FREE_MODEL, models };
 }
 
+// ---------- Шифрование ключей учителей ----------
+// Формат в базе: "enc1:<iv>:<шифротекст>" (base64). Ключ шифрования — SHA-256 от секрета AI_KEY_SECRET.
+const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function cryptoKey(secret: string) {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", hash, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+async function encryptKey(secret: string, plain: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await cryptoKey(secret), new TextEncoder().encode(plain));
+  return `enc1:${b64(iv)}:${b64(new Uint8Array(data))}`;
+}
+// null — не удалось расшифровать (секрет поменяли или его нет).
+async function decryptKey(secret: string | undefined, stored: string): Promise<string | null> {
+  if (!stored.startsWith("enc1:")) return stored; // сохранён до шифрования
+  if (!secret) return null;
+  try {
+    const [, iv, data] = stored.split(":");
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, await cryptoKey(secret), unb64(data));
+    return new TextDecoder().decode(plain);
+  } catch { return null; }
+}
+
 // Сколько стоил запрос: OpenRouter пишет это в usage.cost; если нет — спрашиваем по id запроса.
 async function openRouterCost(apiKey: string, body: { id?: string; usage?: { cost?: number } } | null): Promise<number> {
   const cost = Number(body?.usage?.cost);
@@ -338,23 +363,32 @@ Deno.serve(async (req: Request) => {
   const dbError = (e: { message: string; code?: string }) =>
     json({ error: e.code === "PGRST202" || e.code === "42883" ? "schema_outdated" : e.message }, 400);
 
+  const keySecret = Deno.env.get("AI_KEY_SECRET") || undefined;
   if (action === "set_key") {
     const k = typeof key === "string" ? key.trim() : "";
     // Проверяем ключ в OpenRouter до сохранения.
     const res = k ? await fetch("https://openrouter.ai/api/v1/key", { headers: { Authorization: `Bearer ${k}` } }).catch(() => null) : null;
     if (!res?.ok) return json({ error: "ai_bad_own_key" }, 400);
-    const { data, error } = await admin.rpc("ai_save_key", { p_user: userId, p_key: k });
+    if (!keySecret) return json({ error: "ai_no_key_secret" }, 500);
+    const { data, error } = await admin.rpc("ai_save_key", { p_user: userId, p_key: await encryptKey(keySecret, k), p_hint: k.slice(-4) });
     if (error) return dbError(error);
     return json(data);
   }
 
   const { data: account, error: accountError } = await admin.rpc("ai_account", { p_user: userId });
   if (accountError) return dbError(accountError);
-  const ownKey: string | null = account.apiKey ?? null;
+  const storedKey: string | null = account.apiKey ?? null;
+  const ownKey = storedKey ? await decryptKey(keySecret, storedKey) : null;
+  // Ключ есть, но не расшифровывается — просим учителя сохранить его заново (запасной ключ сайта не подставляем).
+  if (storedKey && !ownKey && action !== "usage") return json({ error: "ai_own_bad_key", detail: "decrypt" }, 400);
+  // Ключ, сохранённый до шифрования, шифруем при первом же использовании.
+  if (storedKey && ownKey && !storedKey.startsWith("enc1:") && keySecret) {
+    await admin.rpc("ai_save_key", { p_user: userId, p_key: await encryptKey(keySecret, ownKey), p_hint: account.keyHint ?? ownKey.slice(-4) });
+  }
   const access: string = account.access;
   const status = {
     access, spent: Number(account.spent), trialLimit: Number(account.trialLimit), trialEndsAt: account.trialEndsAt,
-    ownKey: !!ownKey, keyHint: account.keyHint ?? null,
+    ownKey: !!storedKey, keyHint: account.keyHint ?? null,
   };
 
   if (!ownKey && !anthropicKey && !openRouterKey) return json({ error: "ai_not_configured", detail: "OPENROUTER_API_KEY is not set" }, 500);
@@ -369,6 +403,7 @@ Deno.serve(async (req: Request) => {
 
   if (action === "usage") {
     // Свой ключ — его расходы и остаток; администратор — счёт сайта; остальные — пробный период или доступ к общему ключу.
+    if (storedKey && !ownKey) return json({ provider: "openrouter", mode: "own", error: "ai_own_bad_key", ...status });
     if (ownKey) return json({ ...(await openRouterUsage(ownKey)), mode: "own", ...status });
     if (anthropicKey || !openRouterKey) return json({ provider: "anthropic", mode: access === "admin" ? "owner" : "shared", ...status });
     if (access === "admin") return json({ ...(await openRouterUsage(openRouterKey)), mode: "owner", ...status });

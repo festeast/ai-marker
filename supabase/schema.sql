@@ -1367,8 +1367,8 @@ end $$;
 --   • администраторы и учителя, которым администратор разрешил общий ключ (admin.html), — без ограничений;
 --   • новый учитель — пробный период: 14 дней с регистрации и не больше $2 всего;
 --   • после пробного периода платные модели — только со своим ключом OpenRouter (профиль).
--- Бесплатные модели стоят $0 и работают у всех. Свой ключ хранится только в базе, браузер его не получает;
--- прочитать его может только функция grade (роль service_role).
+-- Бесплатные модели стоят $0 и работают у всех. Свой ключ хранится только в базе и зашифрован функцией grade
+-- (секрет AI_KEY_SECRET, в базе его нет); браузер ключ не получает, прочитать его может только grade (роль service_role).
 create table if not exists public.ai_accounts (
   user_id uuid primary key references auth.users(id) on delete cascade,
   api_key text,
@@ -1451,13 +1451,15 @@ language sql stable security definer set search_path = public as $$
   select _ai_status(p_user) || jsonb_build_object('apiKey', (select api_key from ai_accounts where user_id = p_user))
 $$;
 
--- Только для функции grade: сохранить ключ учителя (функция сначала проверяет его в OpenRouter).
-create or replace function public.ai_save_key(p_user uuid, p_key text) returns jsonb
+-- Только для функции grade: сохранить ключ учителя. Функция сначала проверяет его в OpenRouter и шифрует
+-- (в p_key приходит уже зашифрованный ключ, в p_hint — 4 последних символа настоящего ключа).
+drop function if exists public.ai_save_key(uuid, text);
+create or replace function public.ai_save_key(p_user uuid, p_key text, p_hint text) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare k text := nullif(btrim(p_key), '');
 begin
-  if k is null or length(k) > 300 then raise exception 'ai_bad_own_key'; end if;
-  insert into ai_accounts (user_id, api_key, key_hint, updated_at) values (p_user, k, right(k, 4), now())
+  if k is null or length(k) > 2000 then raise exception 'ai_bad_own_key'; end if;
+  insert into ai_accounts (user_id, api_key, key_hint, updated_at) values (p_user, k, left(p_hint, 4), now())
   on conflict (user_id) do update set api_key = excluded.api_key, key_hint = excluded.key_hint, updated_at = now();
   return _ai_status(p_user);
 end $$;
@@ -1470,10 +1472,10 @@ begin
   return _ai_status(p_user);
 end $$;
 
-revoke execute on function public.ai_account(uuid), public.ai_save_key(uuid, text), public.ai_add_usage(uuid, text, text, numeric)
+revoke execute on function public.ai_account(uuid), public.ai_save_key(uuid, text, text), public.ai_add_usage(uuid, text, text, numeric)
   from public, anon, authenticated;
 do $do$ begin
   if exists (select from pg_roles where rolname = 'service_role') then
-    grant execute on function public.ai_account(uuid), public.ai_save_key(uuid, text), public.ai_add_usage(uuid, text, text, numeric) to service_role;
+    grant execute on function public.ai_account(uuid), public.ai_save_key(uuid, text, text), public.ai_add_usage(uuid, text, text, numeric) to service_role;
   end if;
 end $do$;

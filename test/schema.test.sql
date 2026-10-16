@@ -589,7 +589,7 @@ set role authenticated;
 set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
 select pg_temp.check(ai_status()->>'access' = 'trial' and (ai_status()->>'spent')::numeric = 0 and not (ai_status()->>'ownKey')::boolean, 'новый учитель на пробном периоде');
 select pg_temp.expect_error($$ select ai_account('22222222-2222-2222-2222-222222222222') $$, 'permission denied for function ai_account');
-select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', 'sk-or-x') $$, 'permission denied for function ai_save_key');
+select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', 'sk-or-x', 'x') $$, 'permission denied for function ai_save_key');
 select pg_temp.expect_error($$ select ai_add_usage('22222222-2222-2222-2222-222222222222', 'grade', 'm', 5) $$, 'permission denied for function ai_add_usage');
 select pg_temp.expect_error($$ select * from ai_accounts $$, 'permission denied for table ai_accounts');
 select pg_temp.expect_error($$ select admin_set_shared_ai('22222222-2222-2222-2222-222222222222', true) $$, 'forbidden');
@@ -604,9 +604,9 @@ select pg_temp.check((ai_add_usage('22222222-2222-2222-2222-222222222222', 'grad
 select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->>'access' = 'trial', 'до $2 пробный период идёт');
 select pg_temp.check(ai_add_usage('22222222-2222-2222-2222-222222222222', 'feedback', 'openai/gpt-4o', 0.8)->>'access' = 'ended', '$2 потрачено — пробный период закончился');
 select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->'apiKey' = 'null'::jsonb, 'своего ключа нет');
-select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', '  ') $$, 'ai_bad_own_key');
-select pg_temp.check((ai_save_key('22222222-2222-2222-2222-222222222222', ' sk-or-v1-abcd1234 ')->>'keyHint') = '1234', 'ключ сохранён');
-select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->>'apiKey' = 'sk-or-v1-abcd1234', 'функция видит ключ');
+select pg_temp.expect_error($$ select ai_save_key('22222222-2222-2222-2222-222222222222', '  ', '1234') $$, 'ai_bad_own_key');
+select pg_temp.check((ai_save_key('22222222-2222-2222-2222-222222222222', ' enc1:aaa:bbb ', '1234')->>'keyHint') = '1234', 'ключ сохранён');
+select pg_temp.check(ai_account('22222222-2222-2222-2222-222222222222')->>'apiKey' = 'enc1:aaa:bbb', 'функция видит зашифрованный ключ');
 select pg_temp.check(ai_account('11111111-1111-1111-1111-111111111111')->'apiKey' = 'null'::jsonb, 'ключ B не достаётся A');
 reset role;
 

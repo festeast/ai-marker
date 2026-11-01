@@ -709,3 +709,94 @@ select pg_temp.check(jsonb_array_length(save_exam(:phys_id, 'Физика', '[{"
   'формула и в экзамене с открытыми вопросами');
 reset role;
 reset request.jwt.claim.sub;
+
+-- ---------- организации, мини-админы, блокировка и удаление ----------
+insert into auth.users (id, email) values
+  ('55555555-5555-5555-5555-555555555555', 'director@school1.kz'),
+  ('66666666-6666-6666-6666-666666666666', 'teacher@school1.kz'),
+  ('77777777-7777-7777-7777-777777777777', 'teacher@school2.kz');
+set role authenticated;
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select pg_temp.check(admin_role() is null, 'обычный учитель не админ');
+select pg_temp.expect_error($$ select admin_save_org(null, 'Школа 1') $$, 'forbidden');
+select pg_temp.expect_error($$ select admin_ban_user('66666666-6666-6666-6666-666666666666', true) $$, 'forbidden');
+
+-- главный админ A создаёт организации и назначает админа
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.check(admin_role() = 'super', 'A — главный админ');
+select pg_temp.expect_error($$ select admin_save_org(null, '  ') $$, 'org_name_required');
+select (admin_save_org(null, ' Школа 1 ')->>'id')::bigint as org1 \gset
+select (admin_save_org(null, 'Школа 2')->>'id')::bigint as org2 \gset
+select pg_temp.check(admin_save_org(:org1, 'Школа №1', false)->>'name' = 'Школа №1', 'организация переименована');
+select pg_temp.check(admin_set_org('55555555-5555-5555-5555-555555555555', :org1, 'admin')->>'orgRole' = 'admin', 'назначен админ организации');
+select pg_temp.check(admin_set_org('66666666-6666-6666-6666-666666666666', :org1)->>'orgName' = 'Школа №1', 'учитель в организации');
+select admin_set_org('77777777-7777-7777-7777-777777777777', :org2);
+select pg_temp.expect_error(format($$ select admin_set_org('66666666-6666-6666-6666-666666666666', %s, 'boss') $$, :org1), 'invalid_role');
+select pg_temp.expect_error($$ select admin_ban_user('11111111-1111-1111-1111-111111111111', true) $$, 'admin_self');
+
+-- админ организации видит только свою организацию
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select pg_temp.check(admin_role() = 'org' and not is_admin(), 'директор — админ организации');
+select admin_users() as au \gset
+select pg_temp.check((:'au'::jsonb)->>'role' = 'org' and ((:'au'::jsonb)->'totals'->>'users')::int = 2, 'видит только свою организацию');
+select pg_temp.check(jsonb_array_length((:'au'::jsonb)->'orgs') = 1 and not ((:'au'::jsonb)->>'canShareAi')::boolean, 'одна организация, общий ключ нельзя');
+select pg_temp.expect_error($$ select admin_ban_user('77777777-7777-7777-7777-777777777777', true) $$, 'not_found');
+select pg_temp.expect_error($$ select admin_ban_user('11111111-1111-1111-1111-111111111111', true) $$, 'not_found');
+select pg_temp.expect_error($$ select admin_ban_user('55555555-5555-5555-5555-555555555555', true) $$, 'admin_self');
+select pg_temp.expect_error($$ select admin_save_org(null, 'Своя') $$, 'forbidden');
+select pg_temp.expect_error($$ select admin_set_org('77777777-7777-7777-7777-777777777777', null) $$, 'forbidden');
+select pg_temp.expect_error($$ select admin_set_shared_ai('66666666-6666-6666-6666-666666666666', true) $$, 'forbidden');
+select pg_temp.check(_can_manage_folder('66666666-6666-6666-6666-666666666666') and not _can_manage_folder('77777777-7777-7777-7777-777777777777')
+  and not _can_manage_folder('../x'), 'права на файлы библиотеки');
+
+-- блокировка
+select pg_temp.check((admin_ban_user('66666666-6666-6666-6666-666666666666', true)->>'banned')::boolean, 'учитель заблокирован');
+set request.jwt.claim.sub = '66666666-6666-6666-6666-666666666666';
+select pg_temp.expect_error($$ select check_request() $$, 'account_banned');
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select check_request();
+select pg_temp.check(((admin_users())->'totals'->>'banned')::int = 1, 'в итогах один заблокированный');
+select pg_temp.check(not (admin_ban_user('66666666-6666-6666-6666-666666666666', false)->>'banned')::boolean, 'учитель разблокирован');
+set request.jwt.claim.sub = '66666666-6666-6666-6666-666666666666';
+select check_request();
+reset request.jwt.claim.sub;
+set role anon;
+select check_request();
+set role authenticated;
+
+-- главный админ разрешает организации общий ключ — теперь директор может открыть его своим
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select admin_save_org(:org1, 'Школа №1', true);
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select pg_temp.check(admin_set_shared_ai('66666666-6666-6666-6666-666666666666', true)->>'access' = 'allowed', 'директор открыл общий ключ');
+
+-- удаление аккаунта со всеми данными
+set request.jwt.claim.sub = '66666666-6666-6666-6666-666666666666';
+select (create_exam('Удаляемый', 'quiz')->>'id')::bigint as del_exam \gset
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select pg_temp.check(admin_user_files('66666666-6666-6666-6666-666666666666') = '[]'::jsonb, 'файлов нет');
+select admin_delete_user('66666666-6666-6666-6666-666666666666');
+select pg_temp.expect_error($$ select admin_delete_user('66666666-6666-6666-6666-666666666666') $$, 'not_found');
+reset role;
+select pg_temp.check(not exists (select from exams where id = :del_exam) and not exists (select from org_members where user_id = '66666666-6666-6666-6666-666666666666'), 'экзамены и членство удалены');
+set role authenticated;
+
+-- главный админ защищён, удаление организации не удаляет людей
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select admin_delete_org(:org1);
+select pg_temp.check((select u->>'orgId' from jsonb_array_elements(admin_users()->'users') u
+  where u->>'id' = '55555555-5555-5555-5555-555555555555') is null, 'после удаления организации пользователь без неё');
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select pg_temp.expect_error($$ select admin_users() $$, 'forbidden');
+set request.jwt.claim.sub = '77777777-7777-7777-7777-777777777777';
+reset role;
+insert into public.org_members (user_id, org_id, role) values ('55555555-5555-5555-5555-555555555555', :org2, 'admin');
+set role authenticated;
+set request.jwt.claim.sub = '55555555-5555-5555-5555-555555555555';
+select pg_temp.expect_error($$ select admin_ban_user('11111111-1111-1111-1111-111111111111', true) $$, 'not_found');
+reset role;
+insert into public.org_members (user_id, org_id, role) values ('11111111-1111-1111-1111-111111111111', :org2, 'member');
+set role authenticated;
+select pg_temp.expect_error($$ select admin_ban_user('11111111-1111-1111-1111-111111111111', true) $$, 'admin_protected');
+reset role;
+reset request.jwt.claim.sub;

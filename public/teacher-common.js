@@ -22,10 +22,10 @@ function teacherHeader() {
     <span class="row"><span class="badge" id="ai-usage" hidden></span><span class="muted" id="me"></span><button class="secondary small" id="logout">${t('logout')}</button></span></div></header>`;
 }
 
-// Ссылка «Админ» в шапке — только администраторам (таблица admins в базе).
+// Ссылка «Админ» в шапке — только администраторам сайта и админам организаций.
 async function showAdminLink() {
   try {
-    if (!(await rpc('is_admin'))) return;
+    if (!(await rpc('admin_role'))) return;
   } catch { return; }
   const nav = document.querySelector('header .nav');
   if (!nav || nav.querySelector('[href="admin.html"]')) return;

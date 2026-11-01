@@ -275,3 +275,43 @@ input.sci-cell { width: 100%; min-width: 8ch; padding: 6px 8px; border: 1px soli
 table.sci-edit td { min-width: 120px; }
 table.sci-edit td.sci-tools { min-width: 0; border: none; background: none; }
 .sci-cell-check { margin: 4px 0 0; font-size: 12px; white-space: nowrap; }
+
+/* Классная работа по программированию */
+.hero-side { display: grid; gap: 16px; }
+.cw-card { border-color: #c9d6f7; }
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+.tabs .tab { background: none; color: var(--muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 14px; }
+.tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.save-bar { position: sticky; bottom: 0; z-index: 4; box-shadow: 0 -4px 12px rgba(0,0,0,.05); }
+.cw-test-row { grid-template-columns: 28px 1fr 1fr auto auto; }
+.cw-visible { margin: 24px 0 0; font-size: 14px; white-space: nowrap; }
+@media (max-width: 600px) { .cw-test-row { grid-template-columns: 1fr; } .cw-visible { margin: 0; } }
+.wide-dialog { max-width: min(760px, calc(100vw - 32px)); width: 100%; }
+.cw-import-list { max-height: 50vh; }
+table.cw-progress th, table.cw-progress td { padding: 6px 8px; }
+.cw-cell { display: inline-block; min-width: 40px; padding: 2px 8px; border-radius: 6px; font-size: 14px; border: 1px solid transparent; background: none; color: var(--muted); }
+button.cw-cell { cursor: pointer; }
+.cw-cell.solved { background: #dcf3e5; color: var(--ok); font-weight: 700; }
+.cw-cell.partial { background: #fdecc8; color: var(--warn); }
+.cw-cell.writing { background: #eef3ff; color: var(--accent); }
+.cw-layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+.cw-list { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
+.cw-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; color: var(--text); border: 1px solid transparent; border-radius: 8px; padding: 8px; margin-top: 4px; font-weight: normal; }
+.cw-item:hover { background: var(--bg); }
+.cw-item.active { border-color: var(--accent); background: #eef3ff; }
+.cw-num { min-width: 1.6em; color: var(--muted); font-weight: 600; }
+.cw-name { flex: 1; overflow-wrap: anywhere; }
+.cw-item .cw-cell { min-width: 0; padding: 1px 6px; }
+.cw-task { min-width: 0; }
+.cw-statement { margin: 12px 0; }
+.cw-examples { display: grid; gap: 8px; margin: 12px 0; }
+.cw-example, .cw-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cw-example pre, .cw-diff pre { margin-top: 2px; max-height: 160px; }
+.cw-verdict { font-weight: 600; margin: 12px 0 4px; }
+.cw-tests { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.cw-tests li { margin: 0; }
+@media (max-width: 800px) {
+  .cw-layout { grid-template-columns: 1fr; }
+  .cw-list { position: static; max-height: none; }
+}
+@media (max-width: 500px) { .cw-example, .cw-diff { grid-template-columns: 1fr; } }

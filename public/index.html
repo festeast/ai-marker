@@ -30,15 +30,27 @@
         <a class="btn" href="teacher.html" data-i18n="my_cabinet"></a>
       </div>
     </div>
-    <div class="card code-card">
-      <h2 data-i18n="landing_student"></h2>
-      <p class="muted" data-i18n="student_intro"></p>
-      <form id="code-form">
-        <label for="code" data-i18n="enter_code"></label>
-        <input type="text" id="code" autocomplete="off" style="text-transform:uppercase" placeholder="ABC123" required>
-        <div class="error" id="err"></div>
-        <button type="submit" data-i18n="go"></button>
-      </form>
+    <div class="hero-side">
+      <div class="card code-card">
+        <h2 data-i18n="landing_student"></h2>
+        <p class="muted" data-i18n="student_intro"></p>
+        <form id="code-form">
+          <label for="code" data-i18n="enter_code"></label>
+          <input type="text" id="code" autocomplete="off" style="text-transform:uppercase" placeholder="ABC123" required>
+          <div class="error" id="err"></div>
+          <button type="submit" data-i18n="go"></button>
+        </form>
+      </div>
+      <div class="card code-card cw-card" id="classwork">
+        <h2 data-i18n="landing_classwork"></h2>
+        <p class="muted" data-i18n="landing_classwork_text"></p>
+        <form id="cw-form">
+          <label for="cw-code" data-i18n="cw_enter_code"></label>
+          <input type="text" id="cw-code" autocomplete="off" style="text-transform:uppercase" placeholder="ABC123" required>
+          <div class="error" id="cw-err"></div>
+          <button type="submit" data-i18n="go"></button>
+        </form>
+      </div>
     </div>
   </div></section>
 
@@ -61,13 +73,25 @@
     <p class="muted center" data-i18n="landing_footer"></p>
   </main>
   <script>
-    document.getElementById('code-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const code = document.getElementById('code').value.trim().toUpperCase();
+    // Один код — экзамен или классная работа: если не нашли одно, пробуем другое.
+    async function goByCode(code, classworkFirst, errBox) {
+      const tryExam = () => rpc('exam_by_code', { p_code: code }).then(() => examLink(code));
+      const tryCw = () => rpc('classwork_by_code', { p_code: code }).then(() => pageUrl('classwork.html?code=' + encodeURIComponent(code)));
+      const [first, second] = classworkFirst ? [tryCw, tryExam] : [tryExam, tryCw];
       try {
-        await rpc('exam_by_code', { p_code: code });
-        location.href = examLink(code);
-      } catch (err) { document.getElementById('err').textContent = err.message; }
+        location.href = await first();
+      } catch (err) {
+        if (err.code !== 'exam_not_found' && err.code !== 'classwork_not_found') { errBox.textContent = err.message; return; }
+        try { location.href = await second(); } catch { errBox.textContent = err.message; }
+      }
+    }
+    document.getElementById('code-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      goByCode(document.getElementById('code').value.trim().toUpperCase(), false, document.getElementById('err'));
+    });
+    document.getElementById('cw-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      goByCode(document.getElementById('cw-code').value.trim().toUpperCase(), true, document.getElementById('cw-err'));
     });
     // Учитель уже вошёл — ведём сразу в кабинет.
     if (db) db.auth.getSession().then(({ data }) => {

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="title_classworks">Классная работа — AI Marker</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <h2 data-i18n="cw_new"></h2>
+      <p class="muted" data-i18n="cw_intro"></p>
+      <form id="new-cw">
+        <label for="title" data-i18n="cw_title_label"></label>
+        <input type="text" id="title" maxlength="200" required data-i18n-placeholder="cw_title_placeholder">
+        <label for="class" data-i18n="class_name"></label>
+        <input type="text" id="class" maxlength="50" list="classes" style="max-width:240px" data-i18n-placeholder="class_placeholder">
+        <datalist id="classes"></datalist>
+        <div class="error" id="err"></div>
+        <button type="submit" data-i18n="create"></button>
+      </form>
+    </div>
+    <div class="card">
+      <h2 data-i18n="cw_my"></h2>
+      <div id="list"></div>
+    </div>
+  </main>
+  <script>
+    async function load() {
+      const items = await rpc('list_classworks');
+      const list = document.getElementById('list');
+      list.replaceChildren();
+      if (!items.length) { list.append(el('p', { class: 'muted' }, t('cw_none'))); return; }
+      const rows = items.map((x) => el('tr', {},
+        el('td', {}, el('a', { href: 'classwork-edit.html?id=' + x.id }, el('b', {}, x.title)),
+          x.className ? el('span', { class: 'muted' }, ` · ${t('class_name')} ${x.className}`) : null),
+        el('td', {}, el('span', { class: 'badge ' + (x.isOpen ? 'published' : '') }, t(x.isOpen ? 'cw_open' : 'cw_closed'))),
+        el('td', {}, el('code', {}, x.code)),
+        el('td', { class: 'muted' }, `${t('cw_tasks')}: ${x.taskCount} · ${t('cw_students')}: ${x.studentCount}`),
+        el('td', {}, el('span', { class: 'row' },
+          el('a', { href: 'classwork-edit.html?id=' + x.id }, t('open')),
+          el('a', { href: 'classwork-edit.html?id=' + x.id + '#progress' }, t('cw_progress')),
+          el('button', { type: 'button', class: 'secondary small', title: t('cw_copy_hint'), onclick: () => copyCw(x) }, t('copy_exam')),
+          el('button', { type: 'button', class: 'danger small', onclick: () => removeCw(x) }, t('remove')))),
+      ));
+      list.append(el('div', { class: 'table-scroll' }, el('table', {}, el('tbody', {}, rows))));
+    }
+    async function copyCw(x) {
+      const suggested = `${x.title} ${t('copy_suffix')}`;
+      const title = prompt(t('cw_copy_q'), suggested);
+      if (title === null) return;
+      try {
+        const cw = await rpc('copy_classwork', { p_id: x.id, p_title: title.trim() || suggested });
+        location.href = 'classwork-edit.html?id=' + cw.id;
+      } catch (err) { showPageError(err); }
+    }
+    async function removeCw(x) {
+      const q = x.studentCount ? t('cw_delete_q_students').replace('{n}', x.studentCount) : t('cw_delete_q');
+      if (!confirm(q)) return;
+      try { await rpc('delete_classwork', { p_id: x.id }); await load(); } catch (err) { showPageError(err); }
+    }
+    document.getElementById('new-cw').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const cw = await rpc('create_classwork', {
+          p_title: document.getElementById('title').value,
+          p_class_name: document.getElementById('class').value,
+        });
+        location.href = 'classwork-edit.html?id=' + cw.id;
+      } catch (err) { showPageError(err); }
+    });
+    requireLogin().then(async () => {
+      await load();
+      const classes = await rpc('list_classes').catch(() => []);
+      document.getElementById('classes').replaceChildren(...classes.map((c) => el('option', { value: c })));
+    }).catch(showPageError);
+  </script>
+</body>
+</html>

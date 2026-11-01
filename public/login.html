@@ -64,6 +64,7 @@
       } catch (e2) { err.className = 'error'; err.textContent = e2.message; }
     });
     render();
+    if (new URLSearchParams(location.search).has('banned')) document.getElementById('err').textContent = t('err_account_banned');
   </script>
 </body>
 </html>

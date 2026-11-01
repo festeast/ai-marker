@@ -10,26 +10,61 @@
   <script src="teacher-common.js"></script>
 </head>
 <body>
-  <main class="wrap">
+  <main class="wrap" style="max-width:1320px">
     <div class="card">
       <h1 style="margin:0" data-i18n="admin_title"></h1>
-      <p class="muted" style="margin:4px 0 0" data-i18n="admin_intro"></p>
+      <p class="muted" style="margin:4px 0 0" id="intro" data-i18n="admin_intro"></p>
     </div>
     <div class="stats" id="stats"></div>
+    <div class="card" id="orgs-card" hidden>
+      <h2 style="margin:0" data-i18n="admin_orgs"></h2>
+      <p class="muted" style="margin:4px 0 8px" data-i18n="admin_orgs_hint"></p>
+      <form class="row" id="org-form">
+        <input type="text" id="org-name" maxlength="200" data-i18n-placeholder="admin_org_placeholder" style="flex:1;min-width:200px">
+        <button type="submit" data-i18n="admin_org_create"></button>
+      </form>
+      <div id="orgs" style="margin-top:12px"></div>
+    </div>
     <div class="card">
       <div class="row spread">
         <h2 style="margin:0" data-i18n="admin_users"></h2>
-        <input type="text" id="search" data-i18n-placeholder="search" style="width:240px">
+        <span class="row">
+          <select id="org-filter" hidden></select>
+          <input type="text" id="search" data-i18n-placeholder="search" style="width:240px">
+        </span>
       </div>
+      <p class="ok" id="msg" style="margin:8px 0 0"></p>
       <div id="users" style="margin-top:12px"></div>
     </div>
     <div class="error" id="err"></div>
   </main>
   <script>
-    let users = [];
+    let data = null;
     const stat = (num, label) => el('div', { class: 'stat' }, el('div', { class: 'num' }, String(num)), el('div', { class: 'muted' }, label));
     const day = (v) => v ? new Date(v).toLocaleDateString(LOCALE) : '—';
     const dayTime = (v) => v ? new Date(v).toLocaleString(LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+    const isSuper = () => data && data.role === 'super';
+    const showErr = (err) => { document.getElementById('msg').textContent = ''; document.getElementById('err').textContent = err.message; };
+    const clearMsgs = () => { document.getElementById('msg').textContent = ''; document.getElementById('err').textContent = ''; };
+
+    // Кнопка, которая вызывает действие и блокируется, пока оно идёт.
+    function actionButton(label, cls, run) {
+      const btn = el('button', { class: cls + ' small', style: 'margin-top:4px;display:block;white-space:nowrap' }, label);
+      btn.addEventListener('click', async () => {
+        clearMsgs();
+        btn.disabled = true;
+        try { await run(); } catch (err) { showErr(err); }
+        btn.disabled = false;
+      });
+      return btn;
+    }
+
+    // Обновить одного пользователя в списке после действия.
+    function replaceUser(u) {
+      const i = data.users.findIndex((x) => x.id === u.id);
+      if (i >= 0) data.users[i] = u;
+      render();
+    }
 
     // Доступ к общему ключу ИИ: администратор разрешает или запрещает его учителю.
     function aiCell(u) {
@@ -39,52 +74,174 @@
         el('span', { class: 'badge ' + (ai.access === 'ended' ? 'away' : ai.access === 'trial' ? '' : 'published') }, text),
         ai.ownKey ? el('span', { class: 'badge published', style: 'margin-left:4px' }, t('admin_own_key')) : null,
         el('br'), el('span', { class: 'muted' }, `${t('admin_ai_spent')}: ${money(ai.spent ?? 0)}`));
-      if (ai.access !== 'admin') {
+      if (ai.access !== 'admin' && u.canManage && data.canShareAi) {
         const allowed = ai.access === 'allowed';
-        const btn = el('button', { class: 'secondary small', style: 'margin-top:4px;display:block' }, t(allowed ? 'admin_shared_deny' : 'admin_shared_allow'));
-        btn.addEventListener('click', async () => {
-          btn.disabled = true;
-          try { u.ai = await rpc('admin_set_shared_ai', { p_user: u.id, p_allowed: !allowed }); render(); }
-          catch (err) { btn.disabled = false; document.getElementById('err').textContent = err.message; }
-        });
-        cell.appendChild(btn);
+        cell.appendChild(actionButton(t(allowed ? 'admin_shared_deny' : 'admin_shared_allow'), 'secondary', async () => {
+          u.ai = await rpc('admin_set_shared_ai', { p_user: u.id, p_allowed: !allowed });
+          render();
+        }));
       }
       return cell;
     }
 
+    // Организация пользователя: главный админ выбирает её и роль, админ организации просто видит.
+    function orgCell(u) {
+      if (!isSuper()) return el('td', {}, u.orgRole === 'admin' ? t('admin_role_admin') : t('admin_role_member'));
+      const org = el('select', { 'aria-label': t('admin_org'), style: 'width:auto;max-width:200px' },
+        el('option', { value: '' }, t('admin_no_org')),
+        data.orgs.map((o) => el('option', { value: String(o.id) }, o.name)));
+      org.value = u.orgId ? String(u.orgId) : '';
+      const role = el('select', { 'aria-label': t('admin_org'), style: 'margin-top:4px;width:auto;max-width:200px' },
+        el('option', { value: 'member' }, t('admin_role_member')), el('option', { value: 'admin' }, t('admin_role_admin')));
+      role.value = u.orgRole || 'member';
+      role.hidden = !u.orgId;
+      async function save() {
+        clearMsgs();
+        org.disabled = role.disabled = true;
+        try {
+          replaceUser(await rpc('admin_set_org', { p_user: u.id, p_org: org.value ? Number(org.value) : null, p_role: role.value }));
+          await reloadOrgs();
+        } catch (err) { showErr(err); org.disabled = role.disabled = false; }
+      }
+      org.addEventListener('change', save);
+      role.addEventListener('change', save);
+      return el('td', {}, org, el('br'), role);
+    }
+
+    // Заблокировать / разблокировать и удалить аккаунт.
+    function actionsCell(u) {
+      if (!u.canManage) return el('td', { class: 'muted' }, '—');
+      const ban = actionButton(t(u.banned ? 'admin_unban' : 'admin_ban'), 'secondary', async () => {
+        if (!u.banned && !confirm(t('admin_ban_q').replace('{email}', u.email))) return;
+        replaceUser(await rpc('admin_ban_user', { p_user: u.id, p_banned: !u.banned }));
+      });
+      const del = actionButton(t('admin_delete'), 'danger', async () => {
+        const typed = prompt(t('admin_delete_typed').replace('{email}', u.email).replace('{exams}', u.exams)
+          .replace('{students}', u.participants).replace('{materials}', u.materials));
+        if (typed === null) return;
+        if (typed.trim().toLowerCase() !== String(u.email).trim().toLowerCase()) { alert(t('admin_delete_mismatch')); return; }
+        // Сначала файлы библиотеки из хранилища, потом сам аккаунт со всеми данными.
+        const files = await rpc('admin_user_files', { p_user: u.id });
+        if (files.length) await db.storage.from('library').remove(files).catch(() => {});
+        await rpc('admin_delete_user', { p_user: u.id });
+        await load();
+        document.getElementById('msg').textContent = t('admin_deleted').replace('{email}', u.email);
+      });
+      return el('td', {}, ban, del);
+    }
+
+    function userBadges(u) {
+      return [
+        u.isAdmin ? el('span', { class: 'badge', style: 'margin-left:6px;white-space:nowrap' }, t('admin_badge')) : null,
+        u.orgRole === 'admin' ? el('span', { class: 'badge published', style: 'margin-left:6px;white-space:nowrap' }, t('admin_org_admin_badge')) : null,
+        u.banned ? el('span', { class: 'badge locked', style: 'margin-left:6px;white-space:nowrap' }, t('admin_banned_badge')) : null];
+    }
+
     function render() {
       const q = document.getElementById('search').value.trim().toLowerCase();
-      const shown = users.filter((u) => !q || [u.email, u.name].some((v) => v && v.toLowerCase().includes(q)));
+      const f = document.getElementById('org-filter').value;
+      const shown = data.users.filter((u) => (!q || [u.email, u.name, u.orgName].some((v) => v && v.toLowerCase().includes(q)))
+        && (!f || (f === 'none' ? !u.orgId : String(u.orgId) === f)));
       const box = document.getElementById('users');
       if (!shown.length) { box.replaceChildren(el('p', { class: 'muted' }, t('nothing_found'))); return; }
-      const head = el('tr', {}, ['#', t('admin_user'), t('admin_registered'), t('admin_last_login'), t('exams_count'), t('admin_students'), t('library_materials'), t('admin_ai')].map((h) => el('th', {}, h)));
-      const rows = shown.map((u, i) => el('tr', {},
+      const head = el('tr', {}, ['#', t('admin_user'), t('admin_org'), t('admin_registered') + ' / ' + t('admin_last_login'), t('admin_activity'), t('admin_ai'), t('admin_actions')].map((h) => el('th', {}, h)));
+      const rows = shown.map((u, i) => el('tr', { class: u.banned ? 'muted' : '' },
         el('td', { class: 'muted' }, String(i + 1)),
-        el('td', {}, el('b', {}, u.name || '—'), u.isAdmin ? el('span', { class: 'badge', style: 'margin-left:6px' }, t('admin_badge')) : null,
+        el('td', {}, el('b', {}, u.name || '—'), userBadges(u),
           el('br'), el('a', { href: 'mailto:' + u.email }, u.email || '—')),
-        el('td', {}, day(u.createdAt)),
-        el('td', {}, dayTime(u.lastSignInAt)),
-        el('td', {}, String(u.exams)),
-        el('td', {}, String(u.participants)),
-        el('td', {}, String(u.materials)),
-        aiCell(u)));
+        orgCell(u),
+        el('td', {}, day(u.createdAt), el('br'), el('span', { class: 'muted' }, dayTime(u.lastSignInAt))),
+        el('td', { style: 'white-space:nowrap' }, `${t('exams_count')}: ${u.exams}`, el('br'), `${t('admin_students')}: ${u.participants}`,
+          el('br'), `${t('library_materials')}: ${u.materials}`),
+        aiCell(u),
+        actionsCell(u)));
       box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', {}, el('thead', {}, head), el('tbody', {}, rows))));
     }
 
+    // Организации — только у главного администратора.
+    function renderOrgs() {
+      const card = document.getElementById('orgs-card');
+      card.hidden = !isSuper();
+      if (!isSuper()) return;
+      const filter = document.getElementById('org-filter');
+      const chosen = filter.value;
+      filter.replaceChildren(el('option', { value: '' }, t('admin_all_orgs')), el('option', { value: 'none' }, t('admin_without_org')),
+        data.orgs.map((o) => el('option', { value: String(o.id) }, o.name)));
+      filter.value = [...filter.options].some((o) => o.value === chosen) ? chosen : '';
+      filter.hidden = !data.orgs.length;
+      const box = document.getElementById('orgs');
+      if (!data.orgs.length) { box.replaceChildren(el('p', { class: 'muted' }, t('admin_orgs_empty'))); return; }
+      box.replaceChildren(...data.orgs.map((o) => {
+        const share = el('input', { type: 'checkbox' });
+        share.checked = o.canShareAi;
+        const saveOrg = async (name, canShareAi) => {
+          clearMsgs();
+          try { await rpc('admin_save_org', { p_id: o.id, p_name: name, p_can_share_ai: canShareAi }); await load(); }
+          catch (err) { showErr(err); share.checked = o.canShareAi; }
+        };
+        share.addEventListener('change', () => saveOrg(o.name, share.checked));
+        const rename = el('button', { class: 'secondary small' }, t('admin_org_rename'));
+        rename.addEventListener('click', () => {
+          const name = prompt(t('admin_org_rename_q'), o.name);
+          if (name !== null && name.trim() && name.trim() !== o.name) saveOrg(name, o.canShareAi);
+        });
+        const del = el('button', { class: 'danger small' }, t('remove'));
+        del.addEventListener('click', async () => {
+          if (!confirm(t('admin_org_delete_q').replace('{name}', o.name))) return;
+          clearMsgs();
+          try { await rpc('admin_delete_org', { p_id: o.id }); await load(); } catch (err) { showErr(err); }
+        });
+        const show = el('a', { href: '#users' }, t('admin_org_counts').replace('{n}', o.members).replace('{a}', o.admins));
+        show.addEventListener('click', () => { filter.value = String(o.id); render(); });
+        return el('div', { class: 'row spread', style: 'border-top:1px solid var(--line);padding:8px 0' },
+          el('div', {}, el('b', {}, o.name), el('br'), show,
+            el('label', { class: 'check', style: 'margin:4px 0 0' }, share, el('span', {}, t('admin_org_share')))),
+          el('span', { class: 'row' }, rename, del));
+      }));
+    }
+
+    async function reloadOrgs() {
+      if (!isSuper()) return;
+      data.orgs = (await rpc('admin_users')).orgs;
+      renderOrgs();
+    }
+
+    function renderAll() {
+      const s = data.totals;
+      document.getElementById('intro').textContent = isSuper() ? t('admin_intro')
+        : t('admin_intro_org').replace('{org}', data.orgs[0] ? data.orgs[0].name : '');
+      document.getElementById('stats').replaceChildren(
+        stat(s.users, t('admin_total_users')), stat(s.newUsers7d, t('admin_new_7d')), stat(s.activeUsers7d, t('admin_active_7d')),
+        stat(s.exams, t('exams_count')), stat(s.participants, t('admin_students')), stat(s.materials, t('library_materials')),
+        s.banned ? stat(s.banned, t('admin_banned_count')) : null);
+      renderOrgs();
+      render();
+    }
+
+    async function load() {
+      data = await rpc('admin_users');
+      renderAll();
+    }
+
+    document.getElementById('org-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearMsgs();
+      const input = document.getElementById('org-name');
+      try {
+        await rpc('admin_save_org', { p_id: null, p_name: input.value });
+        input.value = '';
+        await load();
+      } catch (err) { showErr(err); }
+    });
+
     requireLogin().then(async () => {
-      let data;
-      try { data = await rpc('admin_users'); } catch (err) {
+      try { await load(); } catch (err) {
         if (err.code === 'forbidden') { document.querySelector('main').replaceChildren(el('div', { class: 'card' }, el('h2', {}, t('admin_title')), el('p', {}, t('admin_forbidden')))); return; }
         throw err;
       }
-      const s = data.totals;
-      document.getElementById('stats').replaceChildren(
-        stat(s.users, t('admin_total_users')), stat(s.newUsers7d, t('admin_new_7d')), stat(s.activeUsers7d, t('admin_active_7d')),
-        stat(s.exams, t('exams_count')), stat(s.participants, t('admin_students')), stat(s.materials, t('library_materials')));
-      users = data.users;
-      render();
     }).catch(showPageError);
     document.getElementById('search').addEventListener('input', render);
+    document.getElementById('org-filter').addEventListener('change', render);
   </script>
 </body>
 </html>

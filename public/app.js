@@ -18,6 +18,8 @@ async function rpc(fn, args = {}, timeoutMs) {
   const { data, error } = await query;
   if (error) {
     const msg = error.message || '';
+    // Аккаунт заблокирован администратором: выходим и показываем причину на странице входа.
+    if (msg === 'account_banned') signOutBanned();
     if (I18N.ru['err_' + msg]) throw appError(msg);
     if (/fetch|abort|timeout|network|load failed/i.test(msg)) throw appError('network');
     // Функции нет в базе: schema.sql не выполнен заново после обновления сайта.
@@ -28,6 +30,11 @@ async function rpc(fn, args = {}, timeoutMs) {
     throw err;
   }
   return data;
+}
+
+function signOutBanned() {
+  if (!db || location.pathname.endsWith('/login.html')) return;
+  db.auth.signOut().catch(() => {}).finally(() => { location.href = 'login.html?banned=1'; });
 }
 
 // Вызов функции Supabase (supabase/functions/<name>). Ошибки — те же коды.
@@ -64,11 +71,13 @@ function authErrorCode(error) {
     email_address_invalid: 'invalid_email',
     over_email_send_rate_limit: 'email_rate_limit',
     over_request_rate_limit: 'too_many_requests',
+    user_banned: 'account_banned',
   };
   if (map[error.code]) return map[error.code];
   if (/invalid login/i.test(error.message)) return 'invalid_credentials';
   if (/already registered/i.test(error.message)) return 'email_taken';
   if (/not confirmed/i.test(error.message)) return 'email_not_confirmed';
+  if (/banned/i.test(error.message)) return 'account_banned';
   if (/email rate limit/i.test(error.message)) return 'email_rate_limit';
   if (/sending confirmation|sending.*email|smtp/i.test(error.message)) return 'email_send_failed';
   if (/rate limit|too many/i.test(error.message)) return 'too_many_requests';

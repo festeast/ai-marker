@@ -1346,33 +1346,153 @@ language sql stable security definer set search_path = public as $$
   select auth.uid() is not null and exists (select from admins where user_id = auth.uid())
 $$;
 
--- Все зарегистрированные пользователи с их активностью и общие цифры сайта.
-create or replace function public.admin_users() returns jsonb
+-- ---------- Организации, мини-админы и блокировка ----------
+-- Главный администратор (таблица admins) создаёт организации (школа, отдел образования и т. п.),
+-- добавляет в них пользователей и назначает админов организации. Админ организации видит в admin.html
+-- только пользователей своей организации и может их блокировать, удалять и (если главный админ разрешил
+-- это организации) открывать им общий ключ ИИ. Один пользователь — не больше одной организации.
+create table if not exists public.organizations (
+  id bigint generated always as identity primary key,
+  name text not null check (length(btrim(name)) between 1 and 200),
+  can_share_ai boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.org_members (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  org_id bigint not null references public.organizations(id) on delete cascade,
+  role text not null default 'member' check (role in ('member', 'admin')),
+  added_at timestamptz not null default now()
+);
+create index if not exists org_members_org on public.org_members(org_id);
+-- Заблокированные пользователи: не могут войти и не могут вызывать функции базы (см. check_request ниже).
+create table if not exists public.banned_users (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  banned_at timestamptz not null default now(),
+  banned_by uuid
+);
+alter table public.organizations enable row level security;
+alter table public.org_members enable row level security;
+alter table public.banned_users enable row level security;
+revoke all on public.organizations, public.org_members, public.banned_users from anon, authenticated;
+
+-- Организация, в которой пользователь — админ (или null).
+create or replace function public._org_admin_of(p_user uuid) returns bigint
+language sql stable security definer set search_path = public as $$
+  select org_id from org_members where user_id = p_user and role = 'admin'
+$$;
+
+-- Кто открыл админку: super — главный администратор, org — админ организации, null — никто.
+create or replace function public.admin_role() returns text
+language sql stable security definer set search_path = public as $$
+  select case when is_admin() then 'super' when _org_admin_of(auth.uid()) is not null then 'org' end
+$$;
+
+-- Может ли текущий админ блокировать / удалять пользователя p_user. Себя и главных администраторов — нельзя;
+-- админ организации управляет только обычными участниками своей организации.
+create or replace function public._can_manage(p_user uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select auth.uid() is not null and p_user is not null and p_user <> auth.uid()
+    and not exists (select from admins where user_id = p_user)
+    and (is_admin() or exists (
+      select from org_members me join org_members them on them.org_id = me.org_id
+      where me.user_id = auth.uid() and me.role = 'admin' and them.user_id = p_user and them.role = 'member'))
+$$;
+
+-- Для правил Storage: имя папки файла (id учителя) → можно ли текущему админу управлять этим учителем.
+create or replace function public._can_manage_folder(p_folder text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select p_folder ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' and _can_manage(p_folder::uuid)
+$$;
+
+-- Проверка перед действием админа над пользователем; ошибка, если нельзя.
+create or replace function public._admin_check(p_user uuid) returns text
 language plpgsql stable security definer set search_path = public, auth as $$
+declare r text := admin_role();
 begin
   if auth.uid() is null then raise exception 'unauthorized'; end if;
-  if not is_admin() then raise exception 'forbidden'; end if;
+  if r is null then raise exception 'forbidden'; end if;
+  if p_user is null or not exists (select from auth.users where id = p_user) then raise exception 'not_found'; end if;
+  -- Админ организации не видит чужих пользователей.
+  if r = 'org' and not exists (select from org_members where user_id = p_user and org_id = _org_admin_of(auth.uid())) then
+    raise exception 'not_found';
+  end if;
+  if p_user = auth.uid() then raise exception 'admin_self'; end if;
+  if not _can_manage(p_user) then raise exception 'admin_protected'; end if;
+  return r;
+end $$;
+
+-- Каждый запрос к базе через сайт (PostgREST) сначала проходит эту проверку:
+-- заблокированный пользователь сразу получает ошибку account_banned, даже если ещё не вышел.
+create or replace function public.check_request() returns void
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is not null and exists (select from banned_users where user_id = auth.uid()) then
+    raise exception 'account_banned';
+  end if;
+end $$;
+do $do$ begin
+  if exists (select from pg_roles where rolname = 'authenticator') then
+    alter role authenticator set pgrst.db_pre_request = 'public.check_request';
+    notify pgrst, 'reload config';
+  end if;
+exception when others then raise notice 'pgrst.db_pre_request not set: %', sqlerrm;
+end $do$;
+
+-- Все зарегистрированные пользователи с их активностью и общие цифры сайта.
+-- Главный администратор видит всех, админ организации — только свою организацию.
+create or replace function public.admin_users() returns jsonb
+language plpgsql stable security definer set search_path = public, auth as $$
+declare
+  r text := admin_role();
+  my_org bigint := _org_admin_of(auth.uid());
+  share boolean;
+  ids uuid[];
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if r is null then raise exception 'forbidden'; end if;
+  share := r = 'super' or coalesce((select can_share_ai from organizations where id = my_org), false);
+  select coalesce(array_agg(u.id), '{}') into ids from auth.users u
+  where r = 'super' or exists (select from org_members m where m.user_id = u.id and m.org_id = my_org);
   return jsonb_build_object(
+    'role', r,
+    'canShareAi', share,
+    'orgs', coalesce((
+      select jsonb_agg(jsonb_build_object('id', o.id, 'name', o.name, 'canShareAi', o.can_share_ai, 'createdAt', o.created_at,
+        'members', (select count(*) from org_members m where m.org_id = o.id),
+        'admins', (select count(*) from org_members m where m.org_id = o.id and m.role = 'admin')) order by o.name)
+      from organizations o where r = 'super' or o.id = my_org), '[]'::jsonb),
     'totals', jsonb_build_object(
-      'users', (select count(*) from auth.users),
-      'newUsers7d', (select count(*) from auth.users where created_at > now() - interval '7 days'),
-      'activeUsers7d', (select count(*) from auth.users where last_sign_in_at > now() - interval '7 days'),
-      'exams', (select count(*) from exams),
-      'publishedExams', (select count(*) from exams where code is not null),
-      'participants', (select count(*) from participants),
-      'materials', (select count(*) from materials)),
+      'users', cardinality(ids),
+      'newUsers7d', (select count(*) from auth.users where id = any(ids) and created_at > now() - interval '7 days'),
+      'activeUsers7d', (select count(*) from auth.users where id = any(ids) and last_sign_in_at > now() - interval '7 days'),
+      'banned', (select count(*) from banned_users where user_id = any(ids)),
+      'exams', (select count(*) from exams where teacher_id = any(ids)),
+      'publishedExams', (select count(*) from exams where teacher_id = any(ids) and code is not null),
+      'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = any(ids)),
+      'materials', (select count(*) from materials where teacher_id = any(ids))),
     'users', coalesce((
-      select jsonb_agg(jsonb_build_object(
-        'id', u.id, 'email', u.email, 'name', u.raw_user_meta_data->>'name',
-        'createdAt', u.created_at, 'lastSignInAt', u.last_sign_in_at,
-        'isAdmin', exists (select from admins a where a.user_id = u.id),
-        'exams', (select count(*) from exams e where e.teacher_id = u.id),
-        'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = u.id),
-        'materials', (select count(*) from materials m where m.teacher_id = u.id),
-        'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id),
-        'ai', _ai_status(u.id) - 'keyHint')
-        order by u.created_at desc)
-      from auth.users u), '[]'::jsonb));
+      select jsonb_agg(_admin_user_json(u.id) order by u.created_at desc)
+      from auth.users u where u.id = any(ids)), '[]'::jsonb));
+end $$;
+
+-- Одна строка пользователя в админке.
+create or replace function public._admin_user_json(p_user uuid) returns jsonb
+language plpgsql stable security definer set search_path = public, auth as $$
+begin
+  return (select jsonb_build_object(
+    'id', u.id, 'email', u.email, 'name', u.raw_user_meta_data->>'name',
+    'createdAt', u.created_at, 'lastSignInAt', u.last_sign_in_at,
+    'isAdmin', exists (select from admins a where a.user_id = u.id),
+    'banned', exists (select from banned_users b where b.user_id = u.id),
+    'orgId', m.org_id, 'orgName', o.name, 'orgRole', m.role,
+    'canManage', _can_manage(u.id),
+    'exams', (select count(*) from exams e where e.teacher_id = u.id),
+    'participants', (select count(*) from participants p join exams e on e.id = p.exam_id where e.teacher_id = u.id),
+    'materials', (select count(*) from materials mt where mt.teacher_id = u.id),
+    'lastExamAt', (select max(e.created_at) from exams e where e.teacher_id = u.id),
+    'ai', _ai_status(u.id) - 'keyHint')
+  from auth.users u left join org_members m on m.user_id = u.id left join organizations o on o.id = m.org_id
+  where u.id = p_user);
 end $$;
 
 -- ---------- Запросы инструментов ----------
@@ -1646,9 +1766,11 @@ end $$;
 create or replace function public.admin_set_shared_ai(p_user uuid, p_allowed boolean) returns jsonb
 language plpgsql security definer set search_path = public, auth as $$
 begin
-  if auth.uid() is null then raise exception 'unauthorized'; end if;
-  if not is_admin() then raise exception 'forbidden'; end if;
-  if not exists (select from auth.users where id = p_user) then raise exception 'not_found'; end if;
+  -- Главный администратор — любому; админ организации — своим, если главный админ разрешил это организации.
+  if _admin_check(p_user) = 'org'
+     and not coalesce((select can_share_ai from organizations where id = _org_admin_of(auth.uid())), false) then
+    raise exception 'forbidden';
+  end if;
   insert into ai_accounts (user_id, shared_access) values (p_user, coalesce(p_allowed, false))
   on conflict (user_id) do update set shared_access = excluded.shared_access, updated_at = now();
   return _ai_status(p_user) - 'keyHint';
@@ -1686,5 +1808,111 @@ revoke execute on function public.ai_account(uuid), public.ai_save_key(uuid, tex
 do $do$ begin
   if exists (select from pg_roles where rolname = 'service_role') then
     grant execute on function public.ai_account(uuid), public.ai_save_key(uuid, text, text), public.ai_add_usage(uuid, text, text, numeric) to service_role;
+  end if;
+end $do$;
+
+-- ---------- Админка: блокировка, удаление аккаунтов, организации ----------
+revoke execute on function public._admin_user_json(uuid), public._admin_check(uuid), public._org_admin_of(uuid)
+  from public, anon, authenticated;
+
+-- Заблокировать / разблокировать пользователя. Заблокированный не может войти (auth.users.banned_until),
+-- его открытые входы закрываются, а запросы к базе отклоняются (check_request).
+create or replace function public.admin_ban_user(p_user uuid, p_banned boolean) returns jsonb
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  perform _admin_check(p_user);
+  if coalesce(p_banned, false) then
+    insert into banned_users (user_id, banned_by) values (p_user, auth.uid()) on conflict (user_id) do nothing;
+  else
+    delete from banned_users where user_id = p_user;
+  end if;
+  -- Supabase Auth: запрет входа и выход со всех устройств. В тестах этих таблиц нет — пропускаем.
+  begin
+    if exists (select from information_schema.columns where table_schema = 'auth' and table_name = 'users' and column_name = 'banned_until') then
+      execute 'update auth.users set banned_until = $2 where id = $1'
+        using p_user, case when coalesce(p_banned, false) then now() + interval '100 years' end;
+    end if;
+    if coalesce(p_banned, false) and exists (select from information_schema.tables where table_schema = 'auth' and table_name = 'sessions') then
+      execute 'delete from auth.sessions where user_id = $1' using p_user;
+    end if;
+  exception when insufficient_privilege then null;
+  end;
+  return _admin_user_json(p_user);
+end $$;
+
+-- Файлы библиотеки пользователя — браузер админа удаляет их из Storage перед удалением аккаунта.
+create or replace function public.admin_user_files(p_user uuid) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform _admin_check(p_user);
+  return coalesce((select jsonb_agg(file_path) from materials where teacher_id = p_user and file_path is not null), '[]'::jsonb);
+end $$;
+
+-- Удалить аккаунт навсегда: вместе с экзаменами, работами учеников, оценками, материалами и банком вопросов.
+create or replace function public.admin_delete_user(p_user uuid) returns void
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  perform _admin_check(p_user);
+  delete from auth.users where id = p_user;
+end $$;
+
+-- Главный администратор: создать (p_id = null) или изменить организацию.
+create or replace function public.admin_save_org(p_id bigint, p_name text, p_can_share_ai boolean default false) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare o organizations;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if not is_admin() then raise exception 'forbidden'; end if;
+  if length(btrim(coalesce(p_name, ''))) = 0 then raise exception 'org_name_required'; end if;
+  if p_id is null then
+    insert into organizations (name, can_share_ai) values (left(btrim(p_name), 200), coalesce(p_can_share_ai, false)) returning * into o;
+  else
+    update organizations set name = left(btrim(p_name), 200), can_share_ai = coalesce(p_can_share_ai, false)
+    where id = p_id returning * into o;
+    if not found then raise exception 'not_found'; end if;
+  end if;
+  return jsonb_build_object('id', o.id, 'name', o.name, 'canShareAi', o.can_share_ai);
+end $$;
+
+-- Главный администратор: удалить организацию. Пользователи остаются, просто без организации.
+create or replace function public.admin_delete_org(p_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if not is_admin() then raise exception 'forbidden'; end if;
+  delete from organizations where id = p_id;
+  if not found then raise exception 'not_found'; end if;
+end $$;
+
+-- Главный администратор: поместить пользователя в организацию (p_org = null — убрать) и выбрать роль:
+-- member — участник, admin — админ организации.
+create or replace function public.admin_set_org(p_user uuid, p_org bigint, p_role text default 'member') returns jsonb
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if not is_admin() then raise exception 'forbidden'; end if;
+  if not exists (select from auth.users where id = p_user) then raise exception 'not_found'; end if;
+  if p_role is null or p_role not in ('member', 'admin') then raise exception 'invalid_role'; end if;
+  if p_org is null then
+    delete from org_members where user_id = p_user;
+  else
+    if not exists (select from organizations where id = p_org) then raise exception 'not_found'; end if;
+    insert into org_members (user_id, org_id, role) values (p_user, p_org, p_role)
+    on conflict (user_id) do update set org_id = excluded.org_id, role = excluded.role,
+      added_at = case when org_members.org_id = excluded.org_id then org_members.added_at else now() end;
+  end if;
+  return _admin_user_json(p_user);
+end $$;
+
+-- Файлы библиотеки: админ может открыть и удалить файлы тех, кем управляет (нужно при удалении аккаунта).
+do $do$
+begin
+  if exists (select from information_schema.tables where table_schema = 'storage' and table_name = 'buckets') then
+    drop policy if exists "library: admin read" on storage.objects;
+    drop policy if exists "library: admin delete" on storage.objects;
+    create policy "library: admin read" on storage.objects for select to authenticated
+      using (bucket_id = 'library' and public._can_manage_folder((storage.foldername(name))[1]));
+    create policy "library: admin delete" on storage.objects for delete to authenticated
+      using (bucket_id = 'library' and public._can_manage_folder((storage.foldername(name))[1]));
   end if;
 end $do$;

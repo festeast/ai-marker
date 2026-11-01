@@ -18,7 +18,7 @@ function teacherHeader() {
   const page = location.pathname.split('/').pop();
   const link = (href, key) => `<a href="${href}"${page === href ? ' class="active"' : ''}>${t(key)}</a>`;
   return `<header><div class="wrap"><a class="brand" href="index.html">${t('app_name')}</a>
-    <nav class="nav">${link('teacher.html', 'my_exams')}${link('library.html', 'library')}${link('profile.html', 'profile')}</nav>
+    <nav class="nav">${link('teacher.html', 'my_exams')}${link('classworks.html', 'nav_classwork')}${link('library.html', 'library')}${link('profile.html', 'profile')}</nav>
     <span class="row"><span class="badge" id="ai-usage" hidden></span><span class="muted" id="me"></span><button class="secondary small" id="logout">${t('logout')}</button></span></div></header>`;
 }
 

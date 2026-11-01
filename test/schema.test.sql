@@ -800,3 +800,76 @@ set role authenticated;
 select pg_temp.expect_error($$ select admin_ban_user('11111111-1111-1111-1111-111111111111', true) $$, 'admin_protected');
 reset role;
 reset request.jwt.claim.sub;
+
+-- ---------- классная работа по программированию ----------
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select pg_temp.expect_error($$ select create_classwork(' ') $$, 'title_required');
+select create_classwork('Циклы', '8А') as cw \gset
+select (:'cw'::jsonb->>'id')::bigint as cw_id, :'cw'::jsonb->>'code' as cw_code \gset
+select pg_temp.check(:'cw_code' ~ '^[A-HJ-NP-Z2-9]{6}$', 'у классной работы код из 6 символов');
+select pg_temp.expect_error(format($$ select save_classwork(%s, 'Циклы', '8А', '[{"title":"Сумма","lang":"python","tests":[]}]') $$, :cw_id), 'task_needs_tests');
+select pg_temp.expect_error(format($$ select save_classwork(%s, 'Циклы', '8А', '[{"title":"Сумма","lang":"go","tests":[{"input":"1","output":"1"}]}]') $$, :cw_id), 'invalid_code_lang');
+select save_classwork(:cw_id, 'Циклы', '8А', '[
+  {"title":"Сумма","text":"Сложите два числа","lang":"python","starter":"a = int(input())","reference":"print(1)",
+   "tests":[{"input":"1\n2","output":"3","visible":true},{"input":"5\n5","output":"10"},{"input":"","output":""}]},
+  {"title":"Привет","lang":"java","tests":[{"input":"","output":"Hello"}]}]') as saved \gset
+select (:'saved'::jsonb->'tasks'->0->>'id')::bigint as t1, (:'saved'::jsonb->'tasks'->1->>'id')::bigint as t2 \gset
+select pg_temp.check(jsonb_array_length(:'saved'::jsonb->'tasks'->0->'tests') = 2, 'пустой тест отброшен');
+select pg_temp.check(list_classworks()->0->>'taskCount' = '2', 'в списке 2 задачи');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.expect_error(format('select get_classwork(%s)', :cw_id), 'not_found');
+select pg_temp.expect_error(format('select classwork_progress(%s)', :cw_id), 'not_found');
+
+-- ученик
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error($$ select classwork_by_code('NOPE00') $$, 'classwork_not_found');
+select pg_temp.check(classwork_by_code(lower(:'cw_code'))->>'title' = 'Циклы', 'классная работа по коду');
+select pg_temp.expect_error(format($$ select join_classwork(%L, ' ') $$, :'cw_code'), 'name_required');
+select join_classwork(:'cw_code', 'Айгерим') as cw_token \gset
+select classwork_attempt(:'cw_token') as att \gset
+select pg_temp.check(:'att'::jsonb->'tasks'->0->'tests'->0->>'output' = '3', 'пример виден ученику');
+select pg_temp.check(not (:'att'::jsonb->'tasks'->0->'tests'->1 ? 'output'), 'скрытый тест без ответа');
+select pg_temp.check(:'att'::jsonb->'tasks'->0->'tests'->1->>'input' = E'5\n5', 'ввод скрытого теста есть');
+select pg_temp.check(not (:'att'::jsonb->'tasks'->0 ? 'reference'), 'решение учителя скрыто');
+select pg_temp.check((select count(*) from classwork_tasks) = 0, 'ученик не читает таблицы');
+
+select classwork_save(:'cw_token', :t1, 'print(3)');
+select classwork_check(:'cw_token', :t1, 'print(3)', '[{"output":"3\n"},{"output":"3"}]') as chk \gset
+select pg_temp.check(:'chk'::jsonb->>'passed' = '1' and :'chk'::jsonb->>'total' = '2', 'пройден 1 из 2');
+select pg_temp.check(not (:'chk'::jsonb->'tests'->1 ? 'expected'), 'ожидание скрытого теста не раскрыто');
+select classwork_check(:'cw_token', :t1, 'print(a+b)', '[{"output":"3  \n\n"},{"output":"10"}]') as chk \gset
+select pg_temp.check((:'chk'::jsonb->>'solved')::boolean, 'все тесты пройдены (пробелы в конце не важны)');
+select classwork_check(:'cw_token', :t2, 'x', '[]', 'error: ; expected') as chk \gset
+select pg_temp.check(:'chk'::jsonb->>'passed' = '0', 'ошибка компиляции — тесты не пройдены');
+select classwork_check(:'cw_token', :t1, 'oops', '[{"output":"3"},{"output":"","error":"Traceback"}]') as chk \gset
+select pg_temp.expect_error(format('select classwork_save(%L, %s, %L)', :'cw_token', :t1 + 1000, 'x'), 'not_found');
+select pg_temp.expect_error($$ select classwork_attempt('00000000-0000-0000-0000-000000000000') $$, 'unauthorized');
+
+-- учитель видит прогресс и код
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select classwork_progress(:cw_id) as prog \gset
+select (:'prog'::jsonb->'students'->0->>'id')::bigint as cw_student \gset
+select pg_temp.check(:'prog'::jsonb->'students'->0->'solutions'->(:t1)::text ? 'solvedAt', 'задача 1 отмечена решённой и после неудачной попытки');
+select pg_temp.check(:'prog'::jsonb->'students'->0->'solutions'->(:t1)::text->>'checks' = '3', 'три проверки');
+select pg_temp.check(classwork_solution(:cw_student, :t1)->>'code' = 'oops', 'учитель видит последний код');
+-- правка задач сохраняет решения, удалённая задача уходит вместе с решениями
+select save_classwork(:cw_id, 'Циклы 2', null, format('[{"id":%s,"title":"Сумма!","lang":"python","tests":[{"input":"1\n2","output":"3"}]}]', :t1)::jsonb);
+select pg_temp.check(jsonb_object_keys(classwork_progress(:cw_id)->'students'->0->'solutions') = (:t1)::text, 'осталась одна задача с решением');
+select copy_classwork(:cw_id, '') as cw2 \gset
+select pg_temp.check(:'cw2'::jsonb->>'title' = 'Циклы 2' and :'cw2'::jsonb->>'taskCount' = '1' and :'cw2'::jsonb->>'studentCount' = '0', 'копия с задачами без учеников');
+select set_classwork_open(:cw_id, false);
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.expect_error(format('select classwork_save(%L, %s, %L)', :'cw_token', :t1, 'x'), 'classwork_closed');
+select pg_temp.expect_error(format($$ select join_classwork(%L, 'Б') $$, :'cw_code'), 'classwork_closed');
+select pg_temp.check(not (classwork_attempt(:'cw_token')->>'isOpen')::boolean, 'закрытую работу видно');
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select delete_classwork_student(:cw_student);
+select delete_classwork(:cw_id);
+select pg_temp.check(jsonb_array_length(list_classworks()) = 1, 'осталась копия');
+reset role;
+reset request.jwt.claim.sub;

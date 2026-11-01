@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="title_classworks">Классная работа — AI Marker</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="teacher-common.js"></script><script src="code-runner.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <p><a href="classworks.html" data-i18n="cw_back"></a></p>
+    <div class="card">
+      <div class="row spread">
+        <h1 id="heading" style="margin:0"></h1>
+        <span class="badge" id="status"></span>
+      </div>
+      <p class="muted" data-i18n="cw_share_hint"></p>
+      <label data-i18n="code"></label>
+      <div class="row"><span class="code-box" id="code"></span><button class="secondary small" id="copy-code" data-i18n="copy"></button></div>
+      <label data-i18n="link"></label>
+      <div class="row"><a id="link" target="_blank"></a><button class="secondary small" id="copy-link" data-i18n="copy"></button></div>
+      <p class="row" style="margin-top:16px"><button class="secondary" id="toggle"></button></p>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tab" data-tab="tasks" data-i18n="cw_tab_tasks"></button>
+      <button type="button" class="tab" data-tab="progress" data-i18n="cw_tab_progress"></button>
+    </div>
+
+    <section id="tab-tasks" hidden>
+      <div class="card">
+        <label for="title" data-i18n="cw_title_label"></label>
+        <input type="text" id="title" maxlength="200">
+        <label for="class" data-i18n="class_name"></label>
+        <input type="text" id="class" maxlength="50" list="classes" style="max-width:240px" data-i18n-placeholder="class_placeholder">
+        <datalist id="classes"></datalist>
+      </div>
+      <div id="tasks"></div>
+      <div class="row" style="margin-bottom:16px">
+        <button type="button" class="secondary" id="add-task" data-i18n="cw_add_task"></button>
+        <button type="button" class="secondary" id="import" data-i18n="cw_import"></button>
+      </div>
+      <div class="card save-bar row spread">
+        <span id="save-msg" class="muted"></span>
+        <button type="button" id="save" data-i18n="save"></button>
+      </div>
+    </section>
+
+    <section id="tab-progress" hidden>
+      <div class="card">
+        <div class="row spread">
+          <h2 style="margin:0" data-i18n="cw_tab_progress"></h2>
+          <span class="muted" id="progress-time"></span>
+        </div>
+        <p class="muted" data-i18n="cw_progress_hint"></p>
+        <div id="progress"></div>
+      </div>
+    </section>
+    <div class="error" id="err"></div>
+  </main>
+
+  <dialog id="code-dialog" class="confirm-dialog wide-dialog">
+    <div class="row spread"><h3 id="cd-title" style="margin:0"></h3><button type="button" class="secondary small" id="cd-close" data-i18n="close"></button></div>
+    <p class="muted" id="cd-info"></p>
+    <pre class="code-view" id="cd-code"></pre>
+  </dialog>
+
+  <dialog id="import-dialog" class="confirm-dialog wide-dialog">
+    <div class="row spread"><h3 style="margin:0" data-i18n="cw_import"></h3><button type="button" class="secondary small" id="imp-close" data-i18n="close"></button></div>
+    <p class="muted" data-i18n="cw_import_hint"></p>
+    <div id="imp-list"></div>
+    <div class="row spread" style="margin-top:12px">
+      <span class="muted" id="imp-msg"></span>
+      <button type="button" id="imp-add" data-i18n="cw_import_add"></button>
+    </div>
+  </dialog>
+
+  <script>
+    const id = Number(new URLSearchParams(location.search).get('id'));
+    let cw = null;          // классная работа с задачами
+    let tasks = [];         // редактируемые задачи
+    let dirty = false;
+
+    const copy = (text, btn) => navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = t('copied');
+      setTimeout(() => { btn.textContent = t('copy'); }, 1500);
+    });
+    const classworkLink = (code) => pageUrl('classwork.html?code=' + encodeURIComponent(code));
+
+    function markDirty() {
+      dirty = true;
+      const msg = document.getElementById('save-msg');
+      msg.className = 'warn'; msg.textContent = t('cw_unsaved');
+    }
+    window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+    function showHeader() {
+      document.getElementById('heading').textContent = cw.title;
+      document.title = cw.title + ' — AI Marker';
+      const st = document.getElementById('status');
+      st.className = 'badge ' + (cw.isOpen ? 'published' : '');
+      st.textContent = t(cw.isOpen ? 'cw_open' : 'cw_closed');
+      document.getElementById('code').textContent = cw.code;
+      const link = document.getElementById('link');
+      link.textContent = link.href = classworkLink(cw.code);
+      document.getElementById('toggle').textContent = t(cw.isOpen ? 'cw_close_btn' : 'cw_open_btn');
+    }
+
+    // ---------- вкладки ----------
+    let progressTimer = null;
+    function showTab(name) {
+      document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+      document.getElementById('tab-tasks').hidden = name !== 'tasks';
+      document.getElementById('tab-progress').hidden = name !== 'progress';
+      history.replaceState(null, '', '#' + name);
+      clearInterval(progressTimer);
+      if (name === 'progress') {
+        loadProgress();
+        progressTimer = setInterval(() => { if (!document.hidden) loadProgress(); }, 10000);
+      }
+    }
+    document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+    // ---------- задачи ----------
+    const newTask = () => ({ title: '', text: '', lang: 'python', starter: '', reference: '', tests: [{ input: '', output: '', visible: true }] });
+    const notes = new WeakMap(); // сообщение под тестами переживает перерисовку
+
+    function renderTasks() {
+      const box = document.getElementById('tasks');
+      if (!tasks.length) {
+        box.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'muted', style: 'margin:0' }, t('cw_no_tasks'))));
+        return;
+      }
+      box.replaceChildren(...tasks.map((task, i) => renderTask(task, i)));
+    }
+
+    function renderTask(task, i) {
+      const input = (attrs, key, onInput) => {
+        const node = el(attrs.tag || 'input', { ...attrs, tag: null });
+        node.value = task[key] || '';
+        node.addEventListener('input', () => { task[key] = node.value; markDirty(); if (onInput) onInput(); });
+        return node;
+      };
+      const heading = el('b', {}, `${i + 1}. ${task.title || t('cw_task_untitled')}`);
+      const title = input({ type: 'text', maxlength: 200 }, 'title', () => { heading.textContent = `${i + 1}. ${task.title || t('cw_task_untitled')}`; });
+      const text = input({ tag: 'textarea', rows: 4, maxlength: 20000, placeholder: t('cw_task_text_placeholder') }, 'text');
+      const lang = el('select', { style: 'width:auto;margin:0' }, CodeRunner.LANGS.map((l) => el('option', { value: l }, CodeRunner.langName(l))));
+      lang.value = task.lang || 'python';
+      lang.addEventListener('change', () => {
+        const old = task.lang;
+        task.lang = lang.value;
+        if (!(task.starter || '').trim() || task.starter === CodeRunner.starter(old)) task.starter = CodeRunner.starter(task.lang);
+        markDirty(); renderTasks();
+      });
+      const starter = CodeRunner.editor(input({ tag: 'textarea', rows: 5 }, 'starter'));
+      const ref = CodeRunner.editor(input({ tag: 'textarea', rows: 5, placeholder: t('cw_reference_placeholder') }, 'reference'));
+
+      const tests = task.tests.map((tc, j) => {
+        const inp = el('textarea', { class: 'code-small', rows: 2, spellcheck: 'false' });
+        inp.value = tc.input || '';
+        inp.addEventListener('input', () => { tc.input = inp.value; markDirty(); });
+        const out = el('textarea', { class: 'code-small', rows: 2, spellcheck: 'false' });
+        out.value = tc.output || '';
+        out.addEventListener('input', () => { tc.output = out.value; markDirty(); });
+        const vis = el('input', { type: 'checkbox' });
+        vis.checked = !!tc.visible;
+        vis.addEventListener('change', () => { tc.visible = vis.checked; markDirty(); });
+        return el('div', { class: 'test-row cw-test-row' }, el('span', { class: 'num' }, `${j + 1}.`),
+          el('div', {}, el('label', {}, t('code_test_input')), inp),
+          el('div', {}, el('label', {}, t('code_test_output')), out),
+          el('label', { class: 'check cw-visible', title: t('cw_test_visible_hint') }, vis, el('span', {}, t('cw_test_visible'))),
+          el('button', { type: 'button', class: 'secondary small', style: 'margin-top:24px', title: t('remove'),
+            onclick: () => { task.tests.splice(j, 1); markDirty(); renderTasks(); } }, '×'));
+      });
+
+      const note = notes.get(task);
+      const msg = el('span', { class: note ? note.cls : 'muted' }, note ? note.text : '');
+      const setMsg = (cls, txt) => { notes.set(task, { cls, text: txt }); msg.className = cls; msg.textContent = txt; };
+      const fill = el('button', { type: 'button', class: 'secondary small' }, t('code_fill_outputs'));
+      fill.addEventListener('click', async () => {
+        if (!(task.reference || '').trim()) { setMsg('error', t('code_no_reference')); return; }
+        if (!task.tests.length) task.tests.push({ input: '', output: '', visible: true });
+        fill.disabled = true;
+        try {
+          const res = await CodeRunner.run(task.lang, task.reference, task.tests.map((x) => x.input || ''), (k) => setMsg('muted', t(k)));
+          if (res.compileError) { setMsg('error', t('code_compile_error') + ': ' + res.compileError.slice(0, 500)); return; }
+          const bad = [];
+          res.results.forEach((r, k) => {
+            task.tests[k].output = r.output.replace(/\s+$/, '');
+            if (r.error || r.timeout) bad.push(r.timeout ? t('code_test_timeout').replace('{i}', k + 1) : t('code_test_error').replace('{i}', k + 1).replace('{error}', r.error.trim().split('\n').pop()));
+          });
+          notes.set(task, bad.length ? { cls: 'error', text: bad.join(' ') } : { cls: 'ok', text: t('code_fill_done') });
+          markDirty(); renderTasks();
+        } catch (err) { setMsg('error', err.message); } finally { fill.disabled = false; }
+      });
+
+      const move = (to) => { const [x] = tasks.splice(i, 1); tasks.splice(to, 0, x); markDirty(); renderTasks(); };
+      return el('div', { class: 'card' },
+        el('div', { class: 'row spread' }, heading, el('span', { class: 'row' },
+          el('button', { type: 'button', class: 'secondary small', title: t('move_up'), disabled: i === 0, onclick: () => move(i - 1) }, '↑'),
+          el('button', { type: 'button', class: 'secondary small', title: t('move_down'), disabled: i === tasks.length - 1, onclick: () => move(i + 1) }, '↓'),
+          el('button', { type: 'button', class: 'danger small', onclick: () => {
+            if (!confirm(t('cw_task_delete_q'))) return;
+            tasks.splice(i, 1); markDirty(); renderTasks();
+          } }, t('remove')))),
+        el('label', {}, t('cw_task_title')), title,
+        el('label', {}, t('cw_task_text')), text,
+        el('label', { class: 'row' }, t('code_lang'), lang),
+        el('label', {}, t('code_starter')), starter,
+        el('label', {}, t('cw_reference')), ref,
+        el('label', { style: 'margin-top:16px' }, el('b', {}, t('code_tests'))),
+        el('p', { class: 'muted', style: 'margin:0' }, t('cw_tests_hint')),
+        ...tests,
+        el('div', { class: 'row', style: 'margin-top:8px' },
+          el('button', { type: 'button', class: 'secondary small', onclick: () => { task.tests.push({ input: '', output: '', visible: false }); markDirty(); renderTasks(); } }, t('code_add_test')),
+          fill, msg));
+    }
+
+    document.getElementById('add-task').addEventListener('click', () => {
+      tasks.push(newTask()); markDirty(); renderTasks();
+      const cards = document.querySelectorAll('#tasks .card');
+      const last = cards[cards.length - 1];
+      if (last) { last.scrollIntoView({ behavior: 'smooth', block: 'start' }); last.querySelector('input').focus({ preventScroll: true }); }
+    });
+    document.getElementById('title').addEventListener('input', markDirty);
+    document.getElementById('class').addEventListener('input', markDirty);
+
+    async function save() {
+      const msg = document.getElementById('save-msg');
+      const btn = document.getElementById('save');
+      btn.disabled = true;
+      try {
+        const res = await rpc('save_classwork', {
+          p_id: id,
+          p_title: document.getElementById('title').value,
+          p_class_name: document.getElementById('class').value,
+          p_tasks: tasks.map((x) => ({ ...(x.id ? { id: x.id } : {}), title: x.title, text: x.text, lang: x.lang,
+            starter: x.starter, reference: x.reference, tests: x.tests })),
+        });
+        cw = res; tasks = res.tasks; dirty = false;
+        showHeader(); renderTasks();
+        msg.className = 'ok'; msg.textContent = t('saved');
+      } catch (err) {
+        msg.className = 'error'; msg.textContent = err.message;
+      } finally { btn.disabled = false; }
+    }
+    document.getElementById('save').addEventListener('click', save);
+
+    // ---------- задачи из экзаменов и банка ----------
+    const impDialog = document.getElementById('import-dialog');
+    let importable = [];
+    document.getElementById('import').addEventListener('click', async () => {
+      const list = document.getElementById('imp-list');
+      document.getElementById('imp-msg').textContent = '';
+      list.replaceChildren(el('p', { class: 'muted' }, '…'));
+      impDialog.showModal();
+      try {
+        importable = await rpc('list_code_tasks');
+        if (!importable.length) { list.replaceChildren(el('p', { class: 'muted' }, t('cw_import_none'))); return; }
+        list.replaceChildren(el('div', { class: 'check-list cw-import-list' }, importable.map((x, k) => el('label', {},
+          el('input', { type: 'checkbox', value: k }),
+          el('span', {}, el('span', { class: 'badge' }, CodeRunner.langName(x.lang)), ' ',
+            x.text.split('\n')[0].slice(0, 120),
+            el('span', { class: 'muted' }, ` · ${x.source === 'bank' ? t('cw_from_bank') : t('cw_from_exam')}${x.from ? ' «' + x.from + '»' : ''} · ${t('code_tests_count').replace('{n}', x.tests.length)}`))))));
+      } catch (err) { list.replaceChildren(el('p', { class: 'error' }, err.message)); }
+    });
+    document.getElementById('imp-close').addEventListener('click', () => impDialog.close());
+    document.getElementById('imp-add').addEventListener('click', () => {
+      const picked = [...document.querySelectorAll('#imp-list input:checked')].map((b) => importable[Number(b.value)]);
+      if (!picked.length) { document.getElementById('imp-msg').textContent = t('bank_pick_first'); return; }
+      for (const x of picked) {
+        const lines = x.text.trim().split('\n');
+        tasks.push({
+          title: lines[0].slice(0, 80), text: x.text, lang: x.lang, starter: x.starter || CodeRunner.starter(x.lang),
+          reference: x.reference || '',
+          tests: (x.tests.length ? x.tests : [{ input: '', output: '' }]).map((tc, k) => ({ input: tc.input || '', output: tc.output || '', visible: k === 0 })),
+        });
+      }
+      impDialog.close(); markDirty(); renderTasks();
+    });
+
+    // ---------- прогресс учеников ----------
+    function cell(sol, task, student) {
+      if (!sol) return el('td', { class: 'muted center' }, '—');
+      let content, cls, hint;
+      if (sol.solvedAt) { content = '✓'; cls = 'cw-cell solved'; hint = t('cw_cell_solved'); }
+      else if (sol.total) { content = `${sol.passed}/${sol.total}`; cls = 'cw-cell partial'; hint = t('cw_cell_partial'); }
+      else { content = '✎'; cls = 'cw-cell writing'; hint = t('cw_cell_writing'); }
+      if (sol.checks) hint += ' · ' + t('cw_checks').replace('{n}', sol.checks);
+      return el('td', { class: 'center' }, el('button', { type: 'button', class: cls, title: hint, onclick: () => showCode(student, task) }, content));
+    }
+
+    async function showCode(student, task) {
+      const dlg = document.getElementById('code-dialog');
+      document.getElementById('cd-title').textContent = `${student.name} — ${task.title}`;
+      document.getElementById('cd-info').textContent = '…';
+      document.getElementById('cd-code').textContent = '';
+      dlg.showModal();
+      try {
+        const s = await rpc('classwork_solution', { p_student_id: student.id, p_task_id: task.id });
+        const parts = [CodeRunner.langName(task.lang)];
+        if (s.solvedAt) parts.push(t('cw_solved_at').replace('{time}', fmtTime(s.solvedAt)));
+        if (s.total) parts.push(t('code_tests_summary').replace('{p}', s.passed).replace('{n}', s.total));
+        parts.push(t('cw_checks').replace('{n}', s.checks));
+        if (s.updatedAt) parts.push(t('cw_updated_at').replace('{time}', fmtTime(s.updatedAt)));
+        document.getElementById('cd-info').textContent = parts.join(' · ');
+        document.getElementById('cd-code').textContent = s.code || t('cw_no_code');
+      } catch (err) { document.getElementById('cd-info').textContent = err.message; }
+    }
+    document.getElementById('cd-close').addEventListener('click', () => document.getElementById('code-dialog').close());
+
+    async function loadProgress() {
+      try {
+        const p = await rpc('classwork_progress', { p_id: id }, 20000);
+        document.getElementById('progress-time').textContent = t('cw_updated_at').replace('{time}', fmtTime(new Date()));
+        const box = document.getElementById('progress');
+        if (!p.tasks.length) { box.replaceChildren(el('p', { class: 'muted' }, t('cw_no_tasks'))); return; }
+        if (!p.students.length) { box.replaceChildren(el('p', { class: 'muted' }, t('cw_no_students'))); return; }
+        const solvedBy = p.tasks.map((task) => p.students.filter((s) => s.solutions[task.id] && s.solutions[task.id].solvedAt).length);
+        const head = el('tr', {}, el('th', {}, t('cw_student')),
+          ...p.tasks.map((task, k) => el('th', { class: 'center', title: task.title }, `${k + 1}`, el('br'), el('span', { class: 'muted small' }, task.title.slice(0, 16)))),
+          el('th', { class: 'center' }, t('cw_solved')), el('th', {}));
+        const rows = p.students.map((s) => {
+          const solved = p.tasks.filter((task) => s.solutions[task.id] && s.solutions[task.id].solvedAt).length;
+          return el('tr', {},
+            el('td', {}, el('b', {}, s.name), ' ', el('span', { class: 'badge ' + (s.online ? 'online' : 'offline') }, t(s.online ? 'cw_online' : 'cw_offline'))),
+            ...p.tasks.map((task) => cell(s.solutions[task.id], task, s)),
+            el('td', { class: 'center' }, el('b', {}, `${solved}/${p.tasks.length}`)),
+            el('td', {}, el('button', { type: 'button', class: 'danger small', title: t('remove'), onclick: async () => {
+              if (!confirm(t('cw_student_delete_q').replace('{name}', s.name))) return;
+              try { await rpc('delete_classwork_student', { p_student_id: s.id }); loadProgress(); } catch (err) { showPageError(err); }
+            } }, '×')));
+        });
+        const foot = el('tr', {}, el('td', { class: 'muted' }, t('cw_solved_by')),
+          ...solvedBy.map((n) => el('td', { class: 'center muted' }, `${n}/${p.students.length}`)), el('td', {}), el('td', {}));
+        box.replaceChildren(el('div', { class: 'table-scroll' }, el('table', { class: 'cw-progress' }, el('thead', {}, head), el('tbody', {}, rows, foot))),
+          el('p', { class: 'muted small', style: 'margin-top:8px' }, t('cw_legend')));
+      } catch (err) { showPageError(err); }
+    }
+
+    // ---------- открыть / закрыть ----------
+    document.getElementById('toggle').addEventListener('click', async () => {
+      try {
+        const res = await rpc('set_classwork_open', { p_id: id, p_open: !cw.isOpen });
+        cw.isOpen = res.isOpen; showHeader();
+      } catch (err) { showPageError(err); }
+    });
+    document.getElementById('copy-code').addEventListener('click', (e) => copy(cw.code, e.target));
+    document.getElementById('copy-link').addEventListener('click', (e) => copy(classworkLink(cw.code), e.target));
+
+    requireLogin().then(async () => {
+      cw = await rpc('get_classwork', { p_id: id });
+      tasks = cw.tasks;
+      document.getElementById('title').value = cw.title;
+      document.getElementById('class').value = cw.className || '';
+      showHeader();
+      renderTasks();
+      const hash = location.hash.slice(1);
+      showTab(hash === 'tasks' || hash === 'progress' ? hash : (tasks.length && cw.studentCount ? 'progress' : 'tasks'));
+      if (!tasks.length) { tasks.push(newTask()); renderTasks(); }
+      const classes = await rpc('list_classes').catch(() => []);
+      document.getElementById('classes').replaceChildren(...classes.map((c) => el('option', { value: c })));
+    }).catch(showPageError);
+  </script>
+</body>
+</html>

@@ -730,19 +730,12 @@ end $$;
 -- «Подтвердить»: фиксирует вопросы и выдаёт код экзамена.
 create or replace function public.publish_exam(p_exam_id bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare
-  e exams := _own_exam(p_exam_id);
-  alphabet constant text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; -- без 0/O и 1/I
-  new_code text;
+declare e exams := _own_exam(p_exam_id);
 begin
   if e.status <> 'draft' then raise exception 'exam_locked'; end if;
   if not exists (select 1 from questions where exam_id = e.id) then raise exception 'no_questions'; end if;
-  loop
-    select string_agg(substr(alphabet, 1 + floor(random() * length(alphabet))::int, 1), '')
-      into new_code from generate_series(1, 6);
-    exit when not exists (select 1 from exams where code = new_code);
-  end loop;
-  update exams set status = 'published', code = new_code, published_at = now() where id = e.id returning * into e;
+  -- _new_code (ниже, в разделе «Классная работа») не повторяет коды экзаменов и классных работ.
+  update exams set status = 'published', code = _new_code(), published_at = now() where id = e.id returning * into e;
   return _exam_json(e);
 end $$;
 
@@ -1916,3 +1909,403 @@ begin
       using (bucket_id = 'library' and public._can_manage_folder((storage.foldername(name))[1]));
   end if;
 end $do$;
+
+-- ---------- Классная работа по программированию ----------
+-- Учитель даёт набор задач на Python или Java с тестами (ввод → ожидаемый вывод).
+-- Ученик входит по коду и имени (без аккаунта), сам выбирает задачи, пишет код и запускает его
+-- в браузере. ИИ не участвует: задача решена, когда программа прошла все тесты учителя.
+-- Ученик получает входные данные всех тестов (чтобы запустить программу), а ожидаемый вывод —
+-- только у тестов-примеров (visible); вывод программы сравнивается с ожиданием здесь, на сервере.
+
+create table if not exists public.classworks (
+  id bigint generated always as identity primary key,
+  teacher_id uuid not null references auth.users(id) on delete cascade,
+  title text not null,
+  class_name text,
+  code text not null unique,
+  is_open boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create index if not exists classworks_teacher on public.classworks(teacher_id, created_at);
+
+-- tests: [{ "input": "...", "output": "...", "visible": true }] — visible: ученик видит тест как пример.
+create table if not exists public.classwork_tasks (
+  id bigint generated always as identity primary key,
+  classwork_id bigint not null references public.classworks(id) on delete cascade,
+  position int not null,
+  title text not null,
+  text text not null default '',
+  lang text not null check (lang in ('python', 'java')),
+  starter text,
+  reference text,           -- решение учителя; ученику не уходит
+  tests jsonb not null default '[]'
+);
+create index if not exists classwork_tasks_cw on public.classwork_tasks(classwork_id, position);
+
+create table if not exists public.classwork_students (
+  id bigint generated always as identity primary key,
+  classwork_id bigint not null references public.classworks(id) on delete cascade,
+  name text not null,
+  token uuid not null unique default gen_random_uuid(),
+  joined_at timestamptz not null default now(),
+  last_seen timestamptz not null default now()
+);
+create index if not exists classwork_students_cw on public.classwork_students(classwork_id);
+
+-- Код ученика по задаче и результат последней проверки тестами.
+-- solved_at — когда задача впервые прошла все тесты (дальше не сбрасывается).
+create table if not exists public.classwork_solutions (
+  student_id bigint not null references public.classwork_students(id) on delete cascade,
+  task_id bigint not null references public.classwork_tasks(id) on delete cascade,
+  code text not null default '',
+  passed int,
+  total int,
+  checks int not null default 0,
+  checked_at timestamptz,
+  solved_at timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key (student_id, task_id)
+);
+
+alter table public.classworks enable row level security;
+alter table public.classwork_tasks enable row level security;
+alter table public.classwork_students enable row level security;
+alter table public.classwork_solutions enable row level security;
+
+-- Сравнение вывода как в CodeRunner.matches: без пробелов в конце строк и пустых строк в конце.
+create or replace function public._cw_norm(s text) returns text
+language sql immutable as $$
+  select regexp_replace(regexp_replace(replace(replace(coalesce(s, ''), E'\r\n', E'\n'), E'\r', E'\n'),
+    '[ \t\f\v ]+(?=\n|$)', '', 'g'), '\s+$', '')
+$$;
+
+-- Новый код из 6 символов, не совпадающий ни с экзаменом, ни с другой классной работой.
+create or replace function public._new_code() returns text
+language plpgsql volatile security definer set search_path = public as $$
+declare
+  alphabet constant text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  c text;
+begin
+  loop
+    select string_agg(substr(alphabet, 1 + floor(random() * length(alphabet))::int, 1), '') into c from generate_series(1, 6);
+    exit when not exists (select 1 from exams where code = c) and not exists (select 1 from classworks where code = c);
+  end loop;
+  return c;
+end $$;
+
+create or replace function public._own_classwork(p_id bigint) returns public.classworks
+language plpgsql stable security definer set search_path = public as $$
+declare c public.classworks;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  select * into c from classworks where id = p_id and teacher_id = auth.uid();
+  if not found then raise exception 'not_found'; end if;
+  return c;
+end $$;
+
+create or replace function public._cw_student(p_token uuid) returns public.classwork_students
+language plpgsql security definer set search_path = public as $$
+declare s public.classwork_students;
+begin
+  update classwork_students set last_seen = now() where token = p_token returning * into s;
+  if not found then raise exception 'unauthorized'; end if;
+  return s;
+end $$;
+
+create or replace function public._classwork_json(c public.classworks) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object('id', c.id, 'title', c.title, 'className', c.class_name, 'code', c.code,
+    'isOpen', c.is_open, 'createdAt', c.created_at,
+    'taskCount', (select count(*) from classwork_tasks t where t.classwork_id = c.id),
+    'studentCount', (select count(*) from classwork_students s where s.classwork_id = c.id))
+$$;
+
+create or replace function public._cw_tasks_json(p_id bigint) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'text', t.text, 'lang', t.lang,
+    'starter', t.starter, 'reference', t.reference, 'tests', t.tests) order by t.position, t.id), '[]'::jsonb)
+  from classwork_tasks t where t.classwork_id = p_id
+$$;
+
+revoke execute on function public._new_code(), public._own_classwork(bigint), public._cw_student(uuid),
+  public._classwork_json(public.classworks), public._cw_tasks_json(bigint)
+  from public, anon, authenticated;
+
+-- Учитель
+
+create or replace function public.list_classworks() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return coalesce((select jsonb_agg(_classwork_json(c) order by c.created_at desc)
+                   from classworks c where c.teacher_id = auth.uid()), '[]'::jsonb);
+end $$;
+
+create or replace function public.create_classwork(p_title text, p_class_name text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare c classworks;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
+  insert into classworks (teacher_id, title, class_name, code)
+  values (auth.uid(), left(trim(p_title), 200), nullif(left(trim(coalesce(p_class_name, '')), 50), ''), _new_code())
+  returning * into c;
+  return _classwork_json(c);
+end $$;
+
+create or replace function public.get_classwork(p_id bigint) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare c classworks := _own_classwork(p_id);
+begin
+  return _classwork_json(c) || jsonb_build_object('tasks', _cw_tasks_json(c.id));
+end $$;
+
+-- Сохраняет название, класс и задачи. Задача с id обновляется (код и результаты учеников по ней
+-- остаются), без id — добавляется, пропавшие из списка — удаляются. Можно менять и во время урока.
+create or replace function public.save_classwork(p_id bigint, p_title text, p_class_name text, p_tasks jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  c classworks := _own_classwork(p_id);
+  q jsonb;
+  i int := 0;
+  keep bigint[] := '{}';
+  tid bigint;
+  v_tests jsonb;
+begin
+  if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
+  if p_tasks is null or jsonb_typeof(p_tasks) <> 'array' then raise exception 'invalid_tasks'; end if;
+  if jsonb_array_length(p_tasks) > 100 then raise exception 'too_many_tasks'; end if;
+  for q in select value from jsonb_array_elements(p_tasks) loop
+    if coalesce(trim(q->>'title'), '') = '' then raise exception 'task_needs_title'; end if;
+    if coalesce(q->>'lang', '') not in ('python', 'java') then raise exception 'invalid_code_lang'; end if;
+    select coalesce(jsonb_agg(jsonb_build_object('input', left(coalesce(x->>'input', ''), 20000),
+             'output', left(coalesce(x->>'output', ''), 20000), 'visible', coalesce((x->>'visible')::boolean, false))), '[]'::jsonb)
+      into v_tests
+      from jsonb_array_elements(case when jsonb_typeof(q->'tests') = 'array' then q->'tests' else '[]'::jsonb end) x
+      where jsonb_typeof(x) = 'object' and (trim(coalesce(x->>'input', '')) <> '' or trim(coalesce(x->>'output', '')) <> '');
+    if jsonb_array_length(v_tests) = 0 then raise exception 'task_needs_tests'; end if;
+    if jsonb_array_length(v_tests) > 50 then raise exception 'too_many_tests'; end if;
+    i := i + 1;
+    tid := null;
+    if q ? 'id' and jsonb_typeof(q->'id') = 'number' then
+      update classwork_tasks set position = i, title = left(trim(q->>'title'), 200), text = left(coalesce(q->>'text', ''), 20000),
+        lang = q->>'lang', starter = left(q->>'starter', 20000), reference = left(q->>'reference', 50000), tests = v_tests
+      where id = (q->>'id')::bigint and classwork_id = c.id returning id into tid;
+    end if;
+    if tid is null then
+      insert into classwork_tasks (classwork_id, position, title, text, lang, starter, reference, tests)
+      values (c.id, i, left(trim(q->>'title'), 200), left(coalesce(q->>'text', ''), 20000), q->>'lang',
+              left(q->>'starter', 20000), left(q->>'reference', 50000), v_tests)
+      returning id into tid;
+    end if;
+    keep := keep || tid;
+  end loop;
+  delete from classwork_tasks where classwork_id = c.id and not (id = any(keep));
+  update classworks set title = left(trim(p_title), 200), class_name = nullif(left(trim(coalesce(p_class_name, '')), 50), '')
+  where id = c.id returning * into c;
+  return _classwork_json(c) || jsonb_build_object('tasks', _cw_tasks_json(c.id));
+end $$;
+
+-- Открыть или закрыть классную работу. Закрытую ученик видит, но не может ни сохранять, ни проверять.
+create or replace function public.set_classwork_open(p_id bigint, p_open boolean) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare c classworks := _own_classwork(p_id);
+begin
+  update classworks set is_open = coalesce(p_open, false) where id = c.id returning * into c;
+  return _classwork_json(c);
+end $$;
+
+create or replace function public.delete_classwork(p_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare c classworks := _own_classwork(p_id);
+begin
+  delete from classworks where id = c.id;
+end $$;
+
+-- Копия с теми же задачами и тестами, без учеников. Открыта сразу, с новым кодом.
+create or replace function public.copy_classwork(p_id bigint, p_title text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  c classworks := _own_classwork(p_id);
+  n classworks;
+begin
+  insert into classworks (teacher_id, title, class_name, code)
+  values (auth.uid(), left(coalesce(nullif(trim(p_title), ''), c.title), 200), c.class_name, _new_code())
+  returning * into n;
+  insert into classwork_tasks (classwork_id, position, title, text, lang, starter, reference, tests)
+  select n.id, position, title, text, lang, starter, reference, tests from classwork_tasks where classwork_id = c.id;
+  return _classwork_json(n);
+end $$;
+
+-- Задачи с кодом из экзаменов и банка учителя — чтобы не набирать их заново.
+create or replace function public.list_code_tasks() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  return coalesce((select jsonb_agg(x order by x->>'source', x->>'from', (x->>'n')::int) from (
+    select jsonb_build_object('source', 'exam', 'from', e.title, 'n', q.position, 'text', q.text, 'lang', coalesce(q.code_lang, 'python'),
+      'starter', q.starter, 'reference', q.reference, 'tests', coalesce(q.tests, '[]'::jsonb)) as x
+    from questions q join exams e on e.id = q.exam_id
+    where e.teacher_id = auth.uid() and q.kind = 'code'
+    union all
+    select jsonb_build_object('source', 'bank', 'from', coalesce(b.topic, ''), 'n', b.id, 'text', b.text, 'lang', coalesce(b.code_lang, 'python'),
+      'starter', b.starter, 'tests', coalesce(b.tests, '[]'::jsonb))
+    from bank_questions b where b.teacher_id = auth.uid() and b.kind = 'code') s), '[]'::jsonb);
+end $$;
+
+-- Прогресс: ученики и их результаты по каждой задаче (без кода).
+create or replace function public.classwork_progress(p_id bigint) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare c classworks := _own_classwork(p_id);
+begin
+  return jsonb_build_object(
+    'classwork', _classwork_json(c),
+    'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'lang', t.lang,
+               'testCount', jsonb_array_length(t.tests)) order by t.position, t.id)
+             from classwork_tasks t where t.classwork_id = c.id), '[]'::jsonb),
+    'students', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', s.id, 'name', s.name, 'joinedAt', s.joined_at, 'lastSeen', s.last_seen,
+        'online', now() - s.last_seen <= online_window(),
+        'solutions', coalesce((select jsonb_object_agg(r.task_id::text, jsonb_strip_nulls(jsonb_build_object(
+            'passed', r.passed, 'total', r.total, 'checks', r.checks, 'checkedAt', r.checked_at,
+            'solvedAt', r.solved_at, 'updatedAt', r.updated_at, 'hasCode', r.code <> '')))
+          from classwork_solutions r where r.student_id = s.id), '{}'::jsonb))
+        order by s.joined_at)
+      from classwork_students s where s.classwork_id = c.id), '[]'::jsonb));
+end $$;
+
+-- Код ученика по задаче (для учителя).
+create or replace function public.classwork_solution(p_student_id bigint, p_task_id bigint) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare
+  s classwork_students;
+  r classwork_solutions;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  select st.* into s from classwork_students st join classworks c on c.id = st.classwork_id
+  where st.id = p_student_id and c.teacher_id = auth.uid();
+  if not found then raise exception 'not_found'; end if;
+  select * into r from classwork_solutions where student_id = s.id and task_id = p_task_id;
+  return jsonb_build_object('name', s.name, 'code', coalesce(r.code, ''), 'passed', r.passed, 'total', r.total,
+    'checks', coalesce(r.checks, 0), 'solvedAt', r.solved_at, 'updatedAt', r.updated_at);
+end $$;
+
+create or replace function public.delete_classwork_student(p_student_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  delete from classwork_students st using classworks c
+  where st.id = p_student_id and c.id = st.classwork_id and c.teacher_id = auth.uid();
+  if not found then raise exception 'not_found'; end if;
+end $$;
+
+-- Ученик
+
+create or replace function public.classwork_by_code(p_code text) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare c classworks;
+begin
+  select * into c from classworks where code = upper(trim(p_code));
+  if not found then raise exception 'classwork_not_found'; end if;
+  return jsonb_build_object('title', c.title, 'code', c.code, 'isOpen', c.is_open);
+end $$;
+
+create or replace function public.join_classwork(p_code text, p_name text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare
+  c classworks;
+  s classwork_students;
+begin
+  select * into c from classworks where code = upper(trim(p_code));
+  if not found then raise exception 'classwork_not_found'; end if;
+  if not c.is_open then raise exception 'classwork_closed'; end if;
+  if coalesce(trim(p_name), '') = '' then raise exception 'name_required'; end if;
+  insert into classwork_students (classwork_id, name) values (c.id, left(trim(p_name), 100)) returning * into s;
+  return s.token;
+end $$;
+
+-- Задачи для ученика: входные данные всех тестов, ожидаемый вывод — только у примеров.
+create or replace function public.classwork_attempt(p_token uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students := _cw_student(p_token);
+  c classworks;
+begin
+  select * into c from classworks where id = s.classwork_id;
+  return jsonb_build_object(
+    'title', c.title, 'isOpen', c.is_open, 'name', s.name,
+    'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'text', t.text, 'lang', t.lang,
+        'starter', t.starter,
+        'tests', (select jsonb_agg(case when (x->>'visible')::boolean
+                    then jsonb_build_object('input', x->'input', 'output', x->'output', 'visible', true)
+                    else jsonb_build_object('input', x->'input', 'visible', false) end order by n)
+                  from jsonb_array_elements(t.tests) with ordinality as a(x, n)))
+        order by t.position, t.id)
+      from classwork_tasks t where t.classwork_id = c.id), '[]'::jsonb),
+    'solutions', coalesce((select jsonb_object_agg(r.task_id::text, jsonb_strip_nulls(jsonb_build_object(
+        'code', r.code, 'passed', r.passed, 'total', r.total, 'solvedAt', r.solved_at)))
+      from classwork_solutions r where r.student_id = s.id), '{}'::jsonb));
+end $$;
+
+create or replace function public._cw_task_for(s public.classwork_students, p_task_id bigint) returns public.classwork_tasks
+language plpgsql stable security definer set search_path = public as $$
+declare t classwork_tasks;
+begin
+  if not (select is_open from classworks where id = s.classwork_id) then raise exception 'classwork_closed'; end if;
+  select * into t from classwork_tasks where id = p_task_id and classwork_id = s.classwork_id;
+  if not found then raise exception 'not_found'; end if;
+  return t;
+end $$;
+revoke execute on function public._cw_task_for(public.classwork_students, bigint) from public, anon, authenticated;
+
+-- Сохраняет код (без проверки) — учитель видит, что ученик работает.
+create or replace function public.classwork_save(p_token uuid, p_task_id bigint, p_code text) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students := _cw_student(p_token);
+  t classwork_tasks := _cw_task_for(s, p_task_id);
+begin
+  insert into classwork_solutions (student_id, task_id, code, updated_at)
+  values (s.id, t.id, left(coalesce(p_code, ''), 50000), now())
+  on conflict (student_id, task_id) do update set code = excluded.code, updated_at = excluded.updated_at;
+end $$;
+
+-- Проверка тестами. Браузер ученика запускает программу на входных данных всех тестов и присылает
+-- что она вывела: p_results = [{ "output": "...", "error": "...", "timeout": false }] по порядку тестов;
+-- p_compile_error — текст ошибки компиляции (тогда тесты не пройдены).
+-- Возвращает число пройденных тестов и по каждому тесту: прошёл ли он, а для примеров — ещё ожидание.
+create or replace function public.classwork_check(p_token uuid, p_task_id bigint, p_code text, p_results jsonb,
+  p_compile_error text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students := _cw_student(p_token);
+  t classwork_tasks := _cw_task_for(s, p_task_id);
+  res jsonb := case when jsonb_typeof(p_results) = 'array' then p_results else '[]'::jsonb end;
+  compiled boolean := coalesce(trim(p_compile_error), '') = '';
+  details jsonb;
+  n_total int := jsonb_array_length(t.tests);
+  n_passed int;
+begin
+  select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+      'ok', ok, 'visible', visible,
+      'expected', case when visible then x->>'output' end)) order by n), '[]'::jsonb),
+    count(*) filter (where ok)
+  into details, n_passed
+  from (
+    select a.x, a.n, coalesce((a.x->>'visible')::boolean, false) as visible,
+      compiled and r is not null and not coalesce((r->>'timeout')::boolean, false)
+        and coalesce(trim(r->>'error'), '') = '' and _cw_norm(r->>'output') = _cw_norm(a.x->>'output') as ok
+    from jsonb_array_elements(t.tests) with ordinality as a(x, n)
+    left join lateral (select res->(a.n::int - 1) as r) rr on true
+  ) z;
+  insert into classwork_solutions (student_id, task_id, code, passed, total, checks, checked_at, solved_at, updated_at)
+  values (s.id, t.id, left(coalesce(p_code, ''), 50000), n_passed, n_total, 1, now(),
+          case when n_passed = n_total then now() end, now())
+  on conflict (student_id, task_id) do update set
+    code = excluded.code, passed = excluded.passed, total = excluded.total,
+    checks = classwork_solutions.checks + 1, checked_at = excluded.checked_at, updated_at = excluded.updated_at,
+    solved_at = coalesce(classwork_solutions.solved_at, excluded.solved_at);
+  return jsonb_build_object('passed', n_passed, 'total', n_total, 'tests', details,
+    'solved', n_passed = n_total);
+end $$;
+

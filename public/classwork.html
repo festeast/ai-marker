@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="title_classwork">Классная работа — AI Marker</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="icon" href="favicon-32.png" sizes="32x32"><link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
+  <script src="code-runner.js"></script>
+</head>
+<body>
+  <header><div class="wrap"><a class="brand" href="index.html" data-i18n="app_name"></a><span class="row"><span class="muted" id="who"></span></span></div></header>
+  <main class="wrap">
+    <h1 id="title"></h1>
+    <div class="card narrow" id="join" hidden>
+      <form id="join-form">
+        <p class="muted" data-i18n="cw_join_hint"></p>
+        <label for="name" data-i18n="your_name"></label>
+        <input type="text" id="name" autocomplete="name" maxlength="100" required>
+        <button type="submit" data-i18n="start"></button>
+      </form>
+    </div>
+    <div class="notice" id="closed" hidden data-i18n="cw_closed_msg"></div>
+    <div class="cw-layout" id="work" hidden>
+      <aside class="card cw-list">
+        <div class="row spread"><b data-i18n="cw_tasks"></b><span class="muted" id="solved-count"></span></div>
+        <div id="task-list"></div>
+      </aside>
+      <section class="card cw-task" id="task"></section>
+    </div>
+    <div class="error" id="err"></div>
+  </main>
+  <script>
+    const code = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
+    const storeKey = 'cw:' + code;
+    let token = null;
+    try { token = localStorage.getItem(storeKey); } catch {}
+    let data = null;           // classwork_attempt
+    let current = null;        // id открытой задачи
+    const editors = new Map(); // id задачи → textarea (переживает перерисовку и обновление списка)
+    const lastCheck = new Map(); // id задачи → результат последней проверки на этой странице
+
+    const showError = (err) => { document.getElementById('err').textContent = err ? err.message : ''; };
+    const draftKey = (taskId) => `${storeKey}:task:${taskId}`;
+    const task = (taskId) => data.tasks.find((x) => x.id === taskId);
+
+    // ---------- сохранение кода: сразу в браузер, через 3 секунды — учителю ----------
+    const pending = new Map(); // id задачи → таймер
+    function scheduleSave(taskId, value) {
+      try { localStorage.setItem(draftKey(taskId), value); } catch {}
+      clearTimeout(pending.get(taskId));
+      pending.set(taskId, setTimeout(() => saveNow(taskId), 3000));
+    }
+    async function saveNow(taskId) {
+      clearTimeout(pending.get(taskId));
+      pending.delete(taskId);
+      const area = editors.get(taskId);
+      if (!area || !data.isOpen) return;
+      try {
+        await rpc('classwork_save', { p_token: token, p_task_id: taskId, p_code: area.value }, 15000);
+        const sol = data.solutions[taskId] || (data.solutions[taskId] = {});
+        sol.code = area.value;
+        setSaveState(taskId, 'cw_saved');
+      } catch (err) {
+        if (err.code === 'classwork_closed') setClosed(true);
+        setSaveState(taskId, 'cw_saved_local');
+      }
+    }
+    function flushAll() { for (const taskId of [...pending.keys()]) saveNow(taskId); }
+    document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
+    window.addEventListener('pagehide', () => {
+      for (const taskId of pending.keys()) {
+        const area = editors.get(taskId);
+        if (area) rpcKeepalive('classwork_save', { p_token: token, p_task_id: taskId, p_code: area.value });
+      }
+    });
+    function setSaveState(taskId, key) {
+      if (taskId !== current) return;
+      const s = document.getElementById('save-state');
+      if (s) s.textContent = t(key);
+    }
+
+    function editorFor(tk) {
+      if (editors.has(tk.id)) return editors.get(tk.id);
+      const area = CodeRunner.editor(el('textarea', { rows: 16, 'aria-label': t('cw_your_code') }));
+      let local = null;
+      try { local = localStorage.getItem(draftKey(tk.id)); } catch {}
+      const server = data.solutions[tk.id] && data.solutions[tk.id].code;
+      area.value = local ?? (server || tk.starter || '');
+      area.addEventListener('input', () => { scheduleSave(tk.id, area.value); setSaveState(tk.id, 'cw_saving'); });
+      area.addEventListener('focus', () => CodeRunner.preload(tk.lang), { once: true });
+      // Черновик с этого устройства новее, чем на сервере: досылаем.
+      if (local !== null && local !== (server || '') && local !== (tk.starter || '')) scheduleSave(tk.id, local);
+      editors.set(tk.id, area);
+      return area;
+    }
+
+    // ---------- список задач ----------
+    function statusOf(tk) {
+      const sol = data.solutions[tk.id];
+      if (sol && sol.solvedAt) return { icon: '✓', cls: 'solved', hint: t('cw_cell_solved') };
+      if (sol && sol.total) return { icon: `${sol.passed}/${sol.total}`, cls: 'partial', hint: t('cw_cell_partial') };
+      if (sol && sol.code) return { icon: '✎', cls: 'writing', hint: t('cw_cell_writing') };
+      return { icon: '', cls: '', hint: '' };
+    }
+    function renderList() {
+      const solved = data.tasks.filter((tk) => data.solutions[tk.id] && data.solutions[tk.id].solvedAt).length;
+      document.getElementById('solved-count').textContent = t('cw_solved_of').replace('{k}', solved).replace('{n}', data.tasks.length);
+      const list = document.getElementById('task-list');
+      if (!data.tasks.length) { list.replaceChildren(el('p', { class: 'muted' }, t('cw_no_tasks_student'))); return; }
+      list.replaceChildren(...data.tasks.map((tk, i) => {
+        const st = statusOf(tk);
+        return el('button', { type: 'button', class: 'cw-item' + (tk.id === current ? ' active' : ''), onclick: () => openTask(tk.id) },
+          el('span', { class: 'cw-num' }, `${i + 1}`),
+          el('span', { class: 'cw-name' }, tk.title, el('span', { class: 'muted small' }, ' · ' + CodeRunner.langName(tk.lang))),
+          el('span', { class: 'cw-cell ' + st.cls, title: st.hint }, st.icon));
+      }));
+    }
+
+    // ---------- задача ----------
+    function openTask(taskId) {
+      if (current && current !== taskId && pending.has(current)) saveNow(current);
+      current = taskId;
+      try { localStorage.setItem(storeKey + ':current', String(taskId)); } catch {}
+      renderList();
+      renderTask();
+      if (window.innerWidth < 800) document.getElementById('task').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function renderTask() {
+      const box = document.getElementById('task');
+      const tk = current && task(current);
+      if (!tk) { box.replaceChildren(el('p', { class: 'muted' }, t(data.tasks.length ? 'cw_pick_task' : 'cw_no_tasks_student'))); return; }
+      const i = data.tasks.indexOf(tk);
+      const area = editorFor(tk);
+      const examples = tk.tests.map((x, k) => ({ ...x, n: k + 1 })).filter((x) => x.visible);
+      const hidden = tk.tests.length - examples.length;
+
+      const stdin = el('textarea', { class: 'code-small', rows: 3, spellcheck: 'false' });
+      const status = el('span', { class: 'muted' });
+      const out = el('div');
+      const runBtn = el('button', { type: 'button', class: 'secondary' }, t('code_run'));
+      const checkBtn = el('button', { type: 'button' }, t('cw_check'));
+      const busy = (on) => { runBtn.disabled = on; checkBtn.disabled = on || !data.isOpen; };
+
+      runBtn.addEventListener('click', async () => {
+        busy(true); status.className = 'muted'; out.replaceChildren();
+        try {
+          const res = await CodeRunner.run(tk.lang, area.value, [stdin.value], (k) => { status.textContent = t(k); }, { echo: true });
+          out.replaceChildren(CodeRunner.resultView(res));
+          status.textContent = t('code_finished');
+        } catch (err) { status.className = 'error'; status.textContent = err.message; } finally { busy(false); }
+      });
+
+      checkBtn.addEventListener('click', async () => {
+        busy(true); status.className = 'muted'; out.replaceChildren();
+        const src = area.value;
+        try {
+          const res = await CodeRunner.run(tk.lang, src, tk.tests.map((x) => x.input || ''), (k) => { status.textContent = t(k); });
+          status.textContent = t('cw_checking');
+          const chk = await rpc('classwork_check', {
+            p_token: token, p_task_id: tk.id, p_code: src,
+            p_results: res.compileError ? [] : res.results.map((r) => ({ output: (r.output || '').slice(0, 20000), error: (r.error || '').slice(0, 2000), timeout: !!r.timeout })),
+            p_compile_error: res.compileError ? res.compileError.slice(0, 2000) : null,
+          }, 20000);
+          clearTimeout(pending.get(tk.id)); pending.delete(tk.id);
+          const sol = data.solutions[tk.id] || (data.solutions[tk.id] = {});
+          Object.assign(sol, { code: src, passed: chk.passed, total: chk.total });
+          if (chk.solved && !sol.solvedAt) sol.solvedAt = new Date().toISOString();
+          lastCheck.set(tk.id, { chk, res });
+          try { localStorage.setItem(draftKey(tk.id), src); } catch {}
+          setSaveState(tk.id, 'cw_saved');
+          status.textContent = '';
+          renderList();
+          out.replaceChildren(checkView(tk, chk, res));
+        } catch (err) {
+          status.className = 'error'; status.textContent = err.message;
+          if (err.code === 'classwork_closed') setClosed(true);
+        } finally { busy(false); }
+      });
+
+      const prev = lastCheck.get(tk.id);
+      if (prev) out.replaceChildren(checkView(tk, prev.chk, prev.res));
+      busy(false);
+
+      box.replaceChildren(
+        el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, `${i + 1}. ${tk.title}`), el('span', { class: 'badge' }, CodeRunner.langName(tk.lang))),
+        tk.text ? el('div', { class: 'sheet-text cw-statement' }, tk.text) : null,
+        examples.length ? el('div', { class: 'cw-examples' }, examples.map((x) => el('div', { class: 'cw-example' },
+          el('div', {}, el('span', { class: 'muted small' }, t('cw_example').replace('{i}', x.n) + ' · ' + t('code_test_input')), el('pre', { class: 'code-view' }, x.input || ' ')),
+          el('div', {}, el('span', { class: 'muted small' }, t('code_test_output')), el('pre', { class: 'code-view' }, x.output || ' '))))) : null,
+        el('p', { class: 'muted small' }, t('cw_tests_info').replace('{n}', tk.tests.length).replace('{h}', hidden)),
+        area,
+        el('div', { class: 'row spread', style: 'margin-top:8px' },
+          el('span', { class: 'row' }, checkBtn, runBtn, status),
+          el('span', { class: 'muted small', id: 'save-state' }, '')),
+        el('details', { style: 'margin-top:8px' }, el('summary', { class: 'muted' }, t('code_stdin')), stdin),
+        el('button', { type: 'button', class: 'secondary small', style: 'margin-top:8px', title: t('cw_reset_hint'), onclick: () => {
+          if (!confirm(t('cw_reset_q'))) return;
+          area.value = tk.starter || ''; scheduleSave(tk.id, area.value);
+        } }, t('cw_reset')),
+        out);
+    }
+
+    // Итог проверки: какие тесты пройдены; у примеров — что ожидалось и что получилось.
+    function checkView(tk, chk, res) {
+      const box = el('div', { class: 'cw-result' });
+      box.append(el('p', { class: chk.solved ? 'ok cw-verdict' : 'warn cw-verdict' },
+        chk.solved ? t('cw_all_passed') : t('code_tests_summary').replace('{p}', chk.passed).replace('{n}', chk.total)));
+      if (res.compileError) {
+        box.append(el('pre', { class: 'code-output' }, el('span', { class: 'err' }, t('code_compile_error') + ':\n' + res.compileError)));
+        return box;
+      }
+      box.append(el('ul', { class: 'cw-tests' }, chk.tests.map((x, k) => {
+        const r = res.results[k] || {};
+        const label = x.visible ? t('cw_example').replace('{i}', k + 1) : t('cw_hidden_test').replace('{i}', k + 1);
+        const li = el('li', { class: x.ok ? 'ok' : 'error' }, (x.ok ? '✓ ' : '✗ ') + label);
+        if (!x.ok) {
+          let why = '';
+          if (r.timeout) why = t('code_timeout');
+          else if (r.error) why = t('code_runtime_error') + ': ' + r.error.trim().split('\n').pop();
+          else if (!x.visible) why = t('cw_wrong_output');
+          if (why) li.append(el('div', { class: 'muted small' }, why));
+          if (x.visible && !r.timeout && !r.error) li.append(el('div', { class: 'cw-diff' },
+            el('div', {}, el('span', { class: 'muted small' }, t('cw_expected')), el('pre', { class: 'code-view' }, x.expected || ' ')),
+            el('div', {}, el('span', { class: 'muted small' }, t('cw_got')), el('pre', { class: 'code-view' }, (r.output || '').replace(/\n$/, '') || ' '))));
+        }
+        return li;
+      })));
+      return box;
+    }
+
+    function setClosed(closed) {
+      data.isOpen = !closed;
+      document.getElementById('closed').hidden = !closed;
+      if (current) renderTask();
+    }
+
+    // ---------- загрузка и обновление ----------
+    async function loadAttempt() {
+      data = await rpc('classwork_attempt', { p_token: token }, 20000);
+      document.getElementById('who').textContent = data.name;
+      document.getElementById('work').hidden = false;
+      document.getElementById('closed').hidden = data.isOpen;
+      let saved = null;
+      try { saved = Number(localStorage.getItem(storeKey + ':current')); } catch {}
+      current = task(saved) ? saved : (data.tasks[0] && data.tasks[0].id) || null;
+      renderList();
+      renderTask();
+      setInterval(refresh, 30000);
+    }
+
+    // Учитель может добавить или поправить задачи во время урока — подтягиваем изменения, не трогая код ученика.
+    async function refresh() {
+      if (document.hidden) return;
+      try {
+        const fresh = await rpc('classwork_attempt', { p_token: token }, 15000);
+        const changed = JSON.stringify(fresh.tasks) !== JSON.stringify(data.tasks);
+        const wasOpen = data.isOpen;
+        for (const [k, v] of Object.entries(fresh.solutions)) {
+          data.solutions[k] = { ...v, code: (data.solutions[k] && data.solutions[k].code) ?? v.code };
+        }
+        data.tasks = fresh.tasks;
+        data.isOpen = fresh.isOpen;
+        document.getElementById('closed').hidden = data.isOpen;
+        if (changed) {
+          if (current && !task(current)) current = (data.tasks[0] && data.tasks[0].id) || null;
+          renderList();
+        }
+        if (changed || wasOpen !== data.isOpen) renderTask();
+        showError(null);
+      } catch (err) {
+        if (err.code === 'unauthorized') { try { localStorage.removeItem(storeKey); } catch {} location.reload(); }
+      }
+    }
+
+    document.getElementById('join-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        token = await rpc('join_classwork', { p_code: code, p_name: document.getElementById('name').value });
+        try { localStorage.setItem(storeKey, token); } catch {}
+        document.getElementById('join').hidden = true;
+        await loadAttempt();
+      } catch (err) { showError(err); }
+    });
+
+    (async function start() {
+      try {
+        const cw = await rpc('classwork_by_code', { p_code: code }, 20000);
+        showError(null);
+        document.getElementById('title').textContent = cw.title;
+        document.title = cw.title + ' — AI Marker';
+        if (token) {
+          try { return await loadAttempt(); } catch (err) {
+            if (err.code !== 'unauthorized') throw err;
+            token = null;
+          }
+        }
+        if (!cw.isOpen) { document.getElementById('closed').hidden = false; return; }
+        document.getElementById('join').hidden = false;
+      } catch (err) {
+        showError(err);
+        if (err.code === 'network' || err.code === 'server_error') setTimeout(start, 5000);
+      }
+    })();
+  </script>
+</body>
+</html>

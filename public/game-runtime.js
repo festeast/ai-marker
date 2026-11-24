@@ -660,25 +660,155 @@ class MazeGame(Game):
 MazeGame().run()
 `,
   };
+  // Каркасы для урока Game Jam: почти без готового кода, только подсказки TODO.
+  // Полные примеры остаются в STARTERS (учитель может подставить их сам).
+  const TASKS = {
+    loop: `from engine import *
+
+class MyGame(Game):
+    def __init__(self):
+        super().__init__(640, 360)
+        # TODO: заведите атрибут — координату x квадрата
+
+    def update(self, dt):
+        # TODO: двигайте квадрат вправо со скоростью 120 пикселей в секунду (скорость * dt)
+        # TODO: у края окна квадрат должен отскакивать
+        pass
+
+    def draw_ui(self, screen):
+        # TODO: напишите приветствие: screen.text(...)
+        # TODO: нарисуйте квадрат 40×40: screen.rect(...)
+        pass
+
+MyGame().run()
+`,
+    player: `from engine import *
+
+class Player(Entity):
+    def __init__(self, x, y):
+        super().__init__(x, y, 32, 32, image="hero")
+        # TODO: приватные атрибуты: скорость и жизни (self.__...)
+
+    # TODO: метод get_lives()
+
+    def update(self, game, dt):
+        # TODO: движение стрелками (game.key("left") ...), скорость * dt
+        # TODO: игрок не выходит за край окна
+        pass
+
+class MyGame(Game):
+    def __init__(self):
+        super().__init__(640, 360)
+        self.player = self.add(Player(300, 160))
+
+    def draw_ui(self, screen):
+        # TODO: покажите жизни игрока через get_lives()
+        pass
+
+MyGame().run()
+`,
+    sprite: `from engine import *
+
+class Player(Entity):
+    def __init__(self, x, y):
+        super().__init__(x, y, 64, 64)
+        # TODO: self.anim = Animation(...) — лист "hero_walk"
+        # TODO: приватная скорость
+
+    def update(self, game, dt):
+        # TODO: влево / вправо; self.flip = True, когда идёт влево
+        # TODO: анимация играет только в движении
+        pass
+
+class MyGame(Game):
+    def __init__(self):
+        super().__init__(640, 360)
+        self.player = self.add(Player(280, 250))
+
+MyGame().run()
+`,
+    map: `from engine import *
+
+# TODO: нарисуйте свой уровень: # — стена, . — пол, P — старт, C — монета
+LEVEL = [
+    "####################",
+    "#P.................#",
+    "#..................#",
+    "#..................#",
+    "####################",
+]
+
+class Player(Entity):
+    def __init__(self, x, y):
+        super().__init__(x, y, 28, 28, image="hero")
+
+    def update(self, game, dt):
+        # TODO: движение; сквозь стены нельзя (game.tilemap.blocked(...)), x и y проверяйте отдельно
+        pass
+
+# TODO: класс Coin
+
+class MyGame(Game):
+    def __init__(self):
+        super().__init__(640, 352)
+        self.tilemap = TileMap(LEVEL, tile=32, legend={"#": "wall"}, solid="#")
+        # TODO: найдите P на карте (find) и поставьте туда игрока
+        # TODO: поставьте монеты на места C
+
+MyGame().run()
+`,
+    inherit: `from engine import *
+
+class Item(Entity):
+    # TODO: __init__(self, x, y, image) и метод on_touch(self, game)
+    pass
+
+# TODO: class Coin(Item) — +10 очков
+# TODO: class Bomb(Item) — -20 очков
+# TODO: ещё один предмет на ваш выбор
+
+class Player(Entity):
+    def __init__(self, x, y):
+        super().__init__(x, y, 32, 32, image="hero")
+
+    def update(self, game, dt):
+        # TODO: движение
+        # TODO: при касании любого Item вызвать его on_touch(game)
+        pass
+
+class MyGame(Game):
+    def __init__(self):
+        super().__init__(640, 360)
+        self.player = self.add(Player(300, 160))
+        # TODO: разбросайте предметы (rand)
+
+    def draw_ui(self, screen):
+        screen.text("Очки: " + str(self.score), 10, 10, 20)
+
+MyGame().run()
+`,
+  };
   const STARTER_ORDER = ['blank', 'coins', 'dodger', 'maze', 'loop', 'player', 'sprite', 'map', 'inherit'];
   const starterName = (k) => t('gm_starter_' + k);
   function starterSelect(onPick) {
     const sel = el('select', { style: 'width:auto;margin:0' },
       el('option', { value: '' }, t('gm_starter_pick')),
-      STARTER_ORDER.map((k) => el('option', { value: k }, starterName(k))));
-    sel.addEventListener('change', () => { const k = sel.value; sel.value = ''; if (k) onPick(k, STARTERS[k]); });
+      STARTER_ORDER.map((k) => el('option', { value: k }, starterName(k))),
+      el('optgroup', { label: t('gm_tasks_group') }, Object.keys(TASKS).map((k) => el('option', { value: 'task:' + k }, starterName(k) + ' — ' + t('gm_task_suffix')))));
+    sel.addEventListener('change', () => { const k = sel.value; sel.value = ''; if (k) onPick(k, k.startsWith('task:') ? TASKS[k.slice(5)] : STARTERS[k]); });
     return sel;
   }
 
   // ---------- готовый урок: 5 коротких шагов и своя игра ----------
   function jamLesson() {
+    // Заготовки — каркасы с TODO: ученик пишет код сам.
     const step = (n, starter, require) => ({
       kind: 'game', lang: 'python', title: t('gm_jam_' + n + '_title'), text: t('gm_jam_' + n + '_text'),
-      starter: STARTERS[starter], tests: [], game: { require, gallery: n === 6 },
+      starter, tests: [], game: { require, gallery: n === 6 },
     });
-    return [step(1, 'loop', []), step(2, 'player', ['enc']), step(3, 'sprite', []), step(4, 'map', []),
-      step(5, 'inherit', ['parent', 'poly']), step(6, 'coins', ['classes', 'enc', 'parent', 'poly', 'static'])];
+    return [step(1, TASKS.loop, []), step(2, TASKS.player, ['enc']), step(3, TASKS.sprite, []), step(4, TASKS.map, ['classes']),
+      step(5, TASKS.inherit, ['parent', 'poly']), step(6, STARTERS.blank, ['classes', 'enc', 'parent', 'poly', 'static'])];
   }
 
-  return { BADGES, analyze, badgesView, stage, warm, cheatSheet, STARTERS, STARTER_ORDER, starterName, starterSelect, jamLesson, Runner };
+  return { BADGES, analyze, badgesView, stage, warm, cheatSheet, STARTERS, TASKS, STARTER_ORDER, starterName, starterSelect, jamLesson, Runner };
 })();

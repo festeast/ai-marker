@@ -549,8 +549,9 @@ select pg_temp.check(
    from unnest(array[:'vt1', :'vt2', :'vt3']::uuid[]) t) > 1, 'варианты у учеников разные');
 -- ответ на чужой вопрос не сохраняется; ответим верно на все вопросы своего варианта
 select submit_attempt(:'vt1', (select jsonb_object_agg(q->>'id', '0') from jsonb_array_elements(get_attempt(:'vt1')->'questions') q)
-  || (select jsonb_object_agg(q.id::text, '0') from (select (x->>'id')::bigint id from jsonb_array_elements(get_attempt(:'vt2')->'questions') x) q
-      where q.id not in (select (y->>'id')::bigint from jsonb_array_elements(get_attempt(:'vt1')->'questions') y)));
+  -- coalesce: если вариант В2 совпал с вариантом В1, чужих вопросов нет, а jsonb_object_agg по пустому набору — null
+  || coalesce((select jsonb_object_agg(q.id::text, '0') from (select (x->>'id')::bigint id from jsonb_array_elements(get_attempt(:'vt2')->'questions') x) q
+      where q.id not in (select (y->>'id')::bigint from jsonb_array_elements(get_attempt(:'vt1')->'questions') y)), '{}'::jsonb));
 reset role;
 set role authenticated;
 set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';

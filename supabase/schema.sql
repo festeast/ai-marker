@@ -1941,6 +1941,14 @@ create table if not exists public.classwork_tasks (
   tests jsonb not null default '[]'
 );
 create index if not exists classwork_tasks_cw on public.classwork_tasks(classwork_id, position);
+-- Вид задачи: 'code' — программа проверяется тестами; 'game' — игра на Python с классами (ООП),
+-- как на OOP Game Jam: ученик пишет игру на движке из public/game-engine.py, запускает её
+-- в браузере и публикует. game — настройки игры: { "require": ["classes","enc","parent","poly","static"],
+-- "gallery": true } — какие ООП-проверки нужны, чтобы задача считалась решённой, и видят ли ученики игры друг друга.
+alter table public.classwork_tasks add column if not exists kind text not null default 'code';
+alter table public.classwork_tasks add column if not exists game jsonb;
+alter table public.classwork_tasks drop constraint if exists classwork_tasks_kind_check;
+alter table public.classwork_tasks add constraint classwork_tasks_kind_check check (kind in ('code', 'game'));
 
 create table if not exists public.classwork_students (
   id bigint generated always as identity primary key,
@@ -1966,6 +1974,15 @@ create table if not exists public.classwork_solutions (
   updated_at timestamptz not null default now(),
   primary key (student_id, task_id)
 );
+-- Для игр: badges — пройденные ООП-проверки при публикации, best_score — лучший счёт из report_score(),
+-- thumb — картинка игры (JPEG data URL), published_at — когда ученик опубликовал игру,
+-- points и note — баллы и комментарий учителя (как оценка жюри).
+alter table public.classwork_solutions add column if not exists badges jsonb;
+alter table public.classwork_solutions add column if not exists best_score numeric;
+alter table public.classwork_solutions add column if not exists thumb text;
+alter table public.classwork_solutions add column if not exists published_at timestamptz;
+alter table public.classwork_solutions add column if not exists points int;
+alter table public.classwork_solutions add column if not exists note text;
 
 alter table public.classworks enable row level security;
 alter table public.classwork_tasks enable row level security;
@@ -2022,8 +2039,8 @@ $$;
 
 create or replace function public._cw_tasks_json(p_id bigint) returns jsonb
 language sql stable security definer set search_path = public as $$
-  select coalesce(jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'text', t.text, 'lang', t.lang,
-    'starter', t.starter, 'reference', t.reference, 'tests', t.tests) order by t.position, t.id), '[]'::jsonb)
+  select coalesce(jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'text', t.text, 'lang', t.lang, 'kind', t.kind,
+    'game', t.game, 'starter', t.starter, 'reference', t.reference, 'tests', t.tests) order by t.position, t.id), '[]'::jsonb)
   from classwork_tasks t where t.classwork_id = p_id
 $$;
 
@@ -2071,31 +2088,45 @@ declare
   keep bigint[] := '{}';
   tid bigint;
   v_tests jsonb;
+  v_kind text;
+  v_game jsonb;
 begin
   if coalesce(trim(p_title), '') = '' then raise exception 'title_required'; end if;
   if p_tasks is null or jsonb_typeof(p_tasks) <> 'array' then raise exception 'invalid_tasks'; end if;
   if jsonb_array_length(p_tasks) > 100 then raise exception 'too_many_tasks'; end if;
   for q in select value from jsonb_array_elements(p_tasks) loop
     if coalesce(trim(q->>'title'), '') = '' then raise exception 'task_needs_title'; end if;
+    v_kind := coalesce(nullif(q->>'kind', ''), 'code');
+    if v_kind not in ('code', 'game') then raise exception 'invalid_tasks'; end if;
+    v_game := null;
+    if v_kind = 'game' then
+      q := q || '{"lang": "python", "tests": [], "reference": null}'::jsonb;
+      v_game := jsonb_build_object(
+        'require', coalesce((select jsonb_agg(distinct r) from jsonb_array_elements_text(
+            case when jsonb_typeof(q->'game'->'require') = 'array' then q->'game'->'require' else '[]'::jsonb end) r
+          where r in ('classes', 'enc', 'parent', 'poly', 'static')), '[]'::jsonb),
+        'gallery', coalesce((q->'game'->>'gallery')::boolean, true));
+    end if;
     if coalesce(q->>'lang', '') not in ('python', 'java') then raise exception 'invalid_code_lang'; end if;
     select coalesce(jsonb_agg(jsonb_build_object('input', left(coalesce(x->>'input', ''), 20000),
              'output', left(coalesce(x->>'output', ''), 20000), 'visible', coalesce((x->>'visible')::boolean, false))), '[]'::jsonb)
       into v_tests
       from jsonb_array_elements(case when jsonb_typeof(q->'tests') = 'array' then q->'tests' else '[]'::jsonb end) x
       where jsonb_typeof(x) = 'object' and (trim(coalesce(x->>'input', '')) <> '' or trim(coalesce(x->>'output', '')) <> '');
-    if jsonb_array_length(v_tests) = 0 then raise exception 'task_needs_tests'; end if;
+    if jsonb_array_length(v_tests) = 0 and v_kind = 'code' then raise exception 'task_needs_tests'; end if;
     if jsonb_array_length(v_tests) > 50 then raise exception 'too_many_tests'; end if;
     i := i + 1;
     tid := null;
     if q ? 'id' and jsonb_typeof(q->'id') = 'number' then
       update classwork_tasks set position = i, title = left(trim(q->>'title'), 200), text = left(coalesce(q->>'text', ''), 20000),
-        lang = q->>'lang', starter = left(q->>'starter', 20000), reference = left(q->>'reference', 50000), tests = v_tests
+        lang = q->>'lang', starter = left(q->>'starter', 20000), reference = left(q->>'reference', 50000), tests = v_tests,
+        kind = v_kind, game = v_game
       where id = (q->>'id')::bigint and classwork_id = c.id returning id into tid;
     end if;
     if tid is null then
-      insert into classwork_tasks (classwork_id, position, title, text, lang, starter, reference, tests)
+      insert into classwork_tasks (classwork_id, position, title, text, lang, starter, reference, tests, kind, game)
       values (c.id, i, left(trim(q->>'title'), 200), left(coalesce(q->>'text', ''), 20000), q->>'lang',
-              left(q->>'starter', 20000), left(q->>'reference', 50000), v_tests)
+              left(q->>'starter', 20000), left(q->>'reference', 50000), v_tests, v_kind, v_game)
       returning id into tid;
     end if;
     keep := keep || tid;
@@ -2132,8 +2163,8 @@ begin
   insert into classworks (teacher_id, title, class_name, code)
   values (auth.uid(), left(coalesce(nullif(trim(p_title), ''), c.title), 200), c.class_name, _new_code())
   returning * into n;
-  insert into classwork_tasks (classwork_id, position, title, text, lang, starter, reference, tests)
-  select n.id, position, title, text, lang, starter, reference, tests from classwork_tasks where classwork_id = c.id;
+  insert into classwork_tasks (classwork_id, position, title, text, lang, starter, reference, tests, kind, game)
+  select n.id, position, title, text, lang, starter, reference, tests, kind, game from classwork_tasks where classwork_id = c.id;
   return _classwork_json(n);
 end $$;
 
@@ -2161,14 +2192,15 @@ begin
   return jsonb_build_object(
     'classwork', _classwork_json(c),
     'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'lang', t.lang,
-               'testCount', jsonb_array_length(t.tests)) order by t.position, t.id)
+               'kind', t.kind, 'game', t.game, 'testCount', jsonb_array_length(t.tests)) order by t.position, t.id)
              from classwork_tasks t where t.classwork_id = c.id), '[]'::jsonb),
     'students', coalesce((select jsonb_agg(jsonb_build_object(
         'id', s.id, 'name', s.name, 'joinedAt', s.joined_at, 'lastSeen', s.last_seen,
         'online', now() - s.last_seen <= online_window(),
         'solutions', coalesce((select jsonb_object_agg(r.task_id::text, jsonb_strip_nulls(jsonb_build_object(
             'passed', r.passed, 'total', r.total, 'checks', r.checks, 'checkedAt', r.checked_at,
-            'solvedAt', r.solved_at, 'updatedAt', r.updated_at, 'hasCode', r.code <> '')))
+            'solvedAt', r.solved_at, 'updatedAt', r.updated_at, 'hasCode', r.code <> '',
+            'badges', r.badges, 'bestScore', r.best_score, 'publishedAt', r.published_at, 'points', r.points)))
           from classwork_solutions r where r.student_id = s.id), '{}'::jsonb))
         order by s.joined_at)
       from classwork_students s where s.classwork_id = c.id), '[]'::jsonb));
@@ -2187,7 +2219,9 @@ begin
   if not found then raise exception 'not_found'; end if;
   select * into r from classwork_solutions where student_id = s.id and task_id = p_task_id;
   return jsonb_build_object('name', s.name, 'code', coalesce(r.code, ''), 'passed', r.passed, 'total', r.total,
-    'checks', coalesce(r.checks, 0), 'solvedAt', r.solved_at, 'updatedAt', r.updated_at);
+    'checks', coalesce(r.checks, 0), 'solvedAt', r.solved_at, 'updatedAt', r.updated_at,
+    'badges', r.badges, 'bestScore', r.best_score, 'thumb', r.thumb, 'publishedAt', r.published_at,
+    'points', r.points, 'note', r.note);
 end $$;
 
 create or replace function public.delete_classwork_student(p_student_id bigint) returns void
@@ -2235,15 +2269,16 @@ begin
   return jsonb_build_object(
     'title', c.title, 'isOpen', c.is_open, 'name', s.name,
     'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'text', t.text, 'lang', t.lang,
-        'starter', t.starter,
-        'tests', (select jsonb_agg(case when (x->>'visible')::boolean
+        'kind', t.kind, 'game', t.game, 'starter', t.starter,
+        'tests', coalesce((select jsonb_agg(case when (x->>'visible')::boolean
                     then jsonb_build_object('input', x->'input', 'output', x->'output', 'visible', true)
                     else jsonb_build_object('input', x->'input', 'visible', false) end order by n)
-                  from jsonb_array_elements(t.tests) with ordinality as a(x, n)))
+                  from jsonb_array_elements(t.tests) with ordinality as a(x, n)), '[]'::jsonb))
         order by t.position, t.id)
       from classwork_tasks t where t.classwork_id = c.id), '[]'::jsonb),
     'solutions', coalesce((select jsonb_object_agg(r.task_id::text, jsonb_strip_nulls(jsonb_build_object(
-        'code', r.code, 'passed', r.passed, 'total', r.total, 'solvedAt', r.solved_at)))
+        'code', r.code, 'passed', r.passed, 'total', r.total, 'solvedAt', r.solved_at,
+        'badges', r.badges, 'bestScore', r.best_score, 'publishedAt', r.published_at, 'points', r.points, 'note', r.note)))
       from classwork_solutions r where r.student_id = s.id), '{}'::jsonb));
 end $$;
 
@@ -2286,6 +2321,7 @@ declare
   n_total int := jsonb_array_length(t.tests);
   n_passed int;
 begin
+  if t.kind <> 'code' then raise exception 'invalid_task_kind'; end if;
   select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
       'ok', ok, 'visible', visible,
       'expected', case when visible then x->>'output' end)) order by n), '[]'::jsonb),
@@ -2309,3 +2345,125 @@ begin
     'solved', n_passed = n_total);
 end $$;
 
+
+-- ---------------------------------------------------------------------------------------------
+-- Игры (ООП) в классной работе — задачи kind = 'game'.
+-- Ученик пишет игру на Python (движок public/game-engine.py), запускает её у себя в браузере и
+-- публикует: код, пройденные ООП-проверки (их считает браузер по тексту кода, учитель на своей
+-- странице пересчитывает их по сохранённому коду), лучший счёт и картинку. Задача решена, когда
+-- игра опубликована и пройдены все проверки, которые выбрал учитель. Учитель ставит баллы.
+
+-- Задача-игра ученика (без проверки, открыта ли классная работа — для просмотра галереи).
+create or replace function public._cw_game_task(s public.classwork_students, p_task_id bigint) returns public.classwork_tasks
+language plpgsql stable security definer set search_path = public as $$
+declare t classwork_tasks;
+begin
+  select * into t from classwork_tasks where id = p_task_id and classwork_id = s.classwork_id and kind = 'game';
+  if not found then raise exception 'not_found'; end if;
+  return t;
+end $$;
+revoke execute on function public._cw_game_task(public.classwork_students, bigint) from public, anon, authenticated;
+
+create or replace function public.classwork_game_publish(p_token uuid, p_task_id bigint, p_code text, p_badges jsonb,
+  p_score numeric default null, p_thumb text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students := _cw_student(p_token);
+  t classwork_tasks := _cw_task_for(s, p_task_id);
+  v_badges jsonb;
+  v_thumb text := case when p_thumb like 'data:image/jpeg;base64,%' and length(p_thumb) <= 60000 then p_thumb end;
+  v_score numeric := case when p_score is not null and p_score between -1e9 and 1e9 then round(p_score, 2) end;
+  v_solved boolean;
+  r classwork_solutions;
+begin
+  if t.kind <> 'game' then raise exception 'invalid_task_kind'; end if;
+  if coalesce(trim(p_code), '') = '' then raise exception 'game_empty'; end if;
+  select coalesce(jsonb_agg(distinct b), '[]'::jsonb) into v_badges
+  from jsonb_array_elements_text(case when jsonb_typeof(p_badges) = 'array' then p_badges else '[]'::jsonb end) b
+  where b in ('classes', 'enc', 'parent', 'poly', 'static');
+  v_solved := coalesce(t.game->'require', '[]'::jsonb) <@ v_badges;
+  insert into classwork_solutions (student_id, task_id, code, badges, best_score, thumb, published_at, checks, checked_at, solved_at, updated_at)
+  values (s.id, t.id, left(p_code, 50000), v_badges, v_score, v_thumb, now(), 1, now(), case when v_solved then now() end, now())
+  on conflict (student_id, task_id) do update set
+    code = excluded.code, badges = excluded.badges,
+    best_score = case when excluded.best_score is null then classwork_solutions.best_score
+                      else greatest(classwork_solutions.best_score, excluded.best_score) end,
+    thumb = coalesce(excluded.thumb, classwork_solutions.thumb),
+    published_at = excluded.published_at, checks = classwork_solutions.checks + 1, checked_at = excluded.checked_at,
+    solved_at = coalesce(classwork_solutions.solved_at, excluded.solved_at), updated_at = excluded.updated_at
+  returning * into r;
+  return jsonb_build_object('solved', v_solved, 'solvedAt', r.solved_at, 'publishedAt', r.published_at,
+    'badges', r.badges, 'bestScore', r.best_score, 'missing',
+    coalesce((select jsonb_agg(x) from jsonb_array_elements_text(coalesce(t.game->'require', '[]'::jsonb)) x
+              where not v_badges ? x), '[]'::jsonb));
+end $$;
+
+-- Игра вызвала report_score(): запоминаем лучший счёт.
+create or replace function public.classwork_game_score(p_token uuid, p_task_id bigint, p_score numeric) returns numeric
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students := _cw_student(p_token);
+  t classwork_tasks := _cw_task_for(s, p_task_id);
+  v numeric;
+begin
+  if t.kind <> 'game' then raise exception 'invalid_task_kind'; end if;
+  if p_score is null or not (p_score between -1e9 and 1e9) then raise exception 'invalid_score'; end if;
+  insert into classwork_solutions (student_id, task_id, best_score) values (s.id, t.id, round(p_score, 2))
+  on conflict (student_id, task_id) do update set
+    best_score = greatest(classwork_solutions.best_score, excluded.best_score)
+  returning best_score into v;
+  return v;
+end $$;
+
+-- Галерея: опубликованные игры класса по задаче (если учитель её не выключил). Можно смотреть и после закрытия.
+create or replace function public.classwork_gallery(p_token uuid, p_task_id bigint) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students := _cw_student(p_token);
+  t classwork_tasks := _cw_game_task(s, p_task_id);
+begin
+  if not coalesce((t.game->>'gallery')::boolean, true) then raise exception 'gallery_off'; end if;
+  return coalesce((select jsonb_agg(jsonb_strip_nulls(jsonb_build_object('name', st.name, 'mine', st.id = s.id,
+      'code', r.code, 'thumb', r.thumb, 'bestScore', r.best_score, 'badges', r.badges, 'publishedAt', r.published_at,
+      'points', r.points)) order by r.points desc nulls last, r.best_score desc nulls last, r.published_at)
+    from classwork_solutions r join classwork_students st on st.id = r.student_id
+    where r.task_id = t.id and r.published_at is not null), '[]'::jsonb);
+end $$;
+
+-- Учитель: все опубликованные игры по задаче, с кодом и картинками.
+create or replace function public.classwork_games(p_id bigint, p_task_id bigint) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare c classworks := _own_classwork(p_id);
+begin
+  if not exists (select 1 from classwork_tasks where id = p_task_id and classwork_id = c.id and kind = 'game') then
+    raise exception 'not_found';
+  end if;
+  return coalesce((select jsonb_agg(jsonb_strip_nulls(jsonb_build_object('studentId', st.id, 'name', st.name,
+      'code', r.code, 'thumb', r.thumb, 'bestScore', r.best_score, 'badges', r.badges, 'publishedAt', r.published_at,
+      'solvedAt', r.solved_at, 'points', r.points, 'note', r.note)) order by r.points desc nulls last, r.best_score desc nulls last, r.published_at)
+    from classwork_solutions r join classwork_students st on st.id = r.student_id
+    where r.task_id = p_task_id and r.published_at is not null), '[]'::jsonb);
+end $$;
+
+-- Баллы (0–100) и комментарий учителя к игре ученика; null — убрать баллы.
+create or replace function public.classwork_set_points(p_student_id bigint, p_task_id bigint, p_points int, p_note text default null)
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s classwork_students;
+  r classwork_solutions;
+begin
+  if auth.uid() is null then raise exception 'unauthorized'; end if;
+  select st.* into s from classwork_students st join classworks c on c.id = st.classwork_id
+  where st.id = p_student_id and c.teacher_id = auth.uid();
+  if not found then raise exception 'not_found'; end if;
+  if not exists (select 1 from classwork_tasks where id = p_task_id and classwork_id = s.classwork_id and kind = 'game') then
+    raise exception 'not_found';
+  end if;
+  if p_points is not null and (p_points < 0 or p_points > 100) then raise exception 'invalid_points'; end if;
+  insert into classwork_solutions (student_id, task_id, points, note)
+  values (s.id, p_task_id, p_points, nullif(left(trim(coalesce(p_note, '')), 2000), ''))
+  on conflict (student_id, task_id) do update set points = excluded.points, note = excluded.note
+  returning * into r;
+  return jsonb_build_object('points', r.points, 'note', r.note);
+end $$;

@@ -873,3 +873,57 @@ select delete_classwork(:cw_id);
 select pg_temp.check(jsonb_array_length(list_classworks()) = 1, 'осталась копия');
 reset role;
 reset request.jwt.claim.sub;
+
+-- ---------- игры (ООП) в классной работе ----------
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select create_classwork('Game Jam', '10А') as gj \gset
+select (:'gj'::jsonb->>'id')::bigint as gj_id, :'gj'::jsonb->>'code' as gj_code \gset
+select save_classwork(:gj_id, 'Game Jam', '10А', '[
+  {"title":"Своя игра","kind":"game","lang":"java","starter":"from engine import *","tests":[{"input":"1","output":"1"}],
+   "game":{"require":["classes","poly","bogus","poly"],"gallery":true}},
+  {"title":"Сумма","lang":"python","tests":[{"input":"1","output":"1"}]},
+  {"title":"Без галереи","kind":"game","game":{"gallery":false}}]') as gsaved \gset
+select (:'gsaved'::jsonb->'tasks'->0->>'id')::bigint as g1, (:'gsaved'::jsonb->'tasks'->1->>'id')::bigint as g2,
+       (:'gsaved'::jsonb->'tasks'->2->>'id')::bigint as g3 \gset
+select pg_temp.check(:'gsaved'::jsonb->'tasks'->0->>'kind' = 'game' and :'gsaved'::jsonb->'tasks'->0->>'lang' = 'python'
+  and jsonb_array_length(:'gsaved'::jsonb->'tasks'->0->'tests') = 0, 'игра: всегда Python, без тестов');
+select pg_temp.check(:'gsaved'::jsonb->'tasks'->0->'game'->'require' = '["classes","poly"]'::jsonb, 'игра: только известные проверки');
+select pg_temp.check(:'gsaved'::jsonb->'tasks'->1->>'kind' = 'code', 'по умолчанию задача с тестами');
+select pg_temp.expect_error(format($$ select save_classwork(%s, 'G', null, '[{"title":"X","kind":"quiz"}]') $$, :gj_id), 'invalid_tasks');
+select pg_temp.check(copy_classwork(:gj_id, 'GJ2')->>'taskCount' = '3', 'копия с играми');
+reset request.jwt.claim.sub;
+set role anon;
+select join_classwork(:'gj_code', 'Арман') as gt1 \gset
+select join_classwork(:'gj_code', 'Дана') as gt2 \gset
+select pg_temp.check(classwork_attempt(:'gt1')->'tasks'->0->'game'->'require' ? 'poly', 'ученик видит требования');
+select pg_temp.expect_error(format('select classwork_check(%L, %s, %L, %L)', :'gt1', :g1, 'x', '[]'), 'invalid_task_kind');
+select pg_temp.expect_error(format('select classwork_game_publish(%L, %s, %L, %L)', :'gt1', :g2, 'x', '[]'), 'invalid_task_kind');
+select pg_temp.expect_error(format('select classwork_game_publish(%L, %s, %L, %L)', :'gt1', :g1, ' ', '[]'), 'game_empty');
+select classwork_save(:'gt1', :g1, 'class A: pass');
+select pg_temp.check(classwork_game_score(:'gt1', :g1, 50) = 50, 'счёт записан');
+select pg_temp.check(classwork_game_score(:'gt1', :g1, 30) = 50, 'лучший счёт не уменьшается');
+select classwork_game_publish(:'gt1', :g1, 'class A: pass', '["classes"]', 20, 'javascript:alert(1)') as pub \gset
+select pg_temp.check(not (:'pub'::jsonb->>'solved')::boolean and :'pub'::jsonb->'missing' = '["poly"]'::jsonb, 'не хватает полиморфизма');
+select pg_temp.check((:'pub'::jsonb->>'bestScore')::numeric = 50, 'лучший счёт сохранился');
+select classwork_game_publish(:'gt1', :g1, 'class B: pass', '["classes","poly","static","x"]', 90, 'data:image/jpeg;base64,AAA') as pub \gset
+select pg_temp.check((:'pub'::jsonb->>'solved')::boolean and (:'pub'::jsonb->>'bestScore')::numeric = 90, 'игра решена, счёт 90');
+select pg_temp.check(jsonb_array_length(classwork_gallery(:'gt2', :g1)) = 1, 'другой ученик видит опубликованную игру');
+select pg_temp.check(classwork_gallery(:'gt2', :g1)->0->>'code' = 'class B: pass' and not (classwork_gallery(:'gt2', :g1)->0->>'mine')::boolean, 'код в галерее');
+select pg_temp.expect_error(format('select classwork_gallery(%L, %s)', :'gt2', :g3), 'gallery_off');
+set role authenticated;
+set request.jwt.claim.sub = '22222222-2222-2222-2222-222222222222';
+select classwork_progress(:gj_id) as gprog \gset
+select (:'gprog'::jsonb->'students'->0->>'id')::bigint as gs1 \gset
+select pg_temp.check(:'gprog'::jsonb->'students'->0->'solutions'->(:g1)::text ? 'publishedAt', 'учитель видит публикацию');
+select pg_temp.check(classwork_games(:gj_id, :g1)->0->>'thumb' = 'data:image/jpeg;base64,AAA', 'картинка игры');
+select pg_temp.expect_error(format('select classwork_set_points(%s, %s, 101)', :gs1, :g1), 'invalid_points');
+select classwork_set_points(:gs1, :g1, 85, ' Отличные классы ');
+select pg_temp.check(classwork_solution(:gs1, :g1)->>'note' = 'Отличные классы' and classwork_solution(:gs1, :g1)->>'points' = '85', 'баллы и комментарий');
+set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+select pg_temp.expect_error(format('select classwork_set_points(%s, %s, 5)', :gs1, :g1), 'not_found');
+select pg_temp.expect_error(format('select classwork_games(%s, %s)', :gj_id, :g1), 'not_found');
+reset request.jwt.claim.sub;
+set role anon;
+select pg_temp.check(classwork_attempt(:'gt1')->'solutions'->(:g1)::text->>'points' = '85', 'ученик видит баллы');
+reset role;

@@ -109,6 +109,7 @@ function rpcKeepalive(fn, args) {
 function applyI18n(root = document) {
   root.querySelectorAll('[data-i18n]').forEach((node) => { node.textContent = t(node.dataset.i18n); });
   root.querySelectorAll('[data-i18n-placeholder]').forEach((node) => { node.placeholder = t(node.dataset.i18nPlaceholder); });
+  root.querySelectorAll('[data-i18n-title]').forEach((node) => { node.title = t(node.dataset.i18nTitle); });
   if (root === document) { document.documentElement.lang = LANG; addLangSwitch(); }
 }
 

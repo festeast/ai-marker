@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
   <script src="config.js"></script><script src="i18n.js"></script><script src="app.js"></script>
-  <script src="code-runner.js"></script>
+  <script src="code-runner.js"></script><script src="game-runtime.js"></script>
 </head>
 <body>
   <header><div class="wrap"><a class="brand" href="index.html" data-i18n="app_name"></a><span class="row"><span class="muted" id="who"></span></span></div></header>
@@ -31,6 +31,11 @@
     </div>
     <div class="error" id="err"></div>
   </main>
+  <dialog id="play-dialog" class="confirm-dialog wide-dialog">
+    <div class="row spread"><h3 id="pd-title" style="margin:0"></h3><button type="button" class="secondary small" id="pd-close" data-i18n="close"></button></div>
+    <div id="pd-stage"></div>
+    <details style="margin-top:8px"><summary class="muted" data-i18n="gm_show_code"></summary><pre class="code-view" id="pd-code"></pre></details>
+  </dialog>
   <script>
     const code = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
     const storeKey = 'cw:' + code;
@@ -89,7 +94,7 @@
       const server = data.solutions[tk.id] && data.solutions[tk.id].code;
       area.value = local ?? (server || tk.starter || '');
       area.addEventListener('input', () => { scheduleSave(tk.id, area.value); setSaveState(tk.id, 'cw_saving'); });
-      area.addEventListener('focus', () => CodeRunner.preload(tk.lang), { once: true });
+      area.addEventListener('focus', () => (tk.kind === 'game' ? GameKit.warm() : CodeRunner.preload(tk.lang)), { once: true });
       // Черновик с этого устройства новее, чем на сервере: досылаем.
       if (local !== null && local !== (server || '') && local !== (tk.starter || '')) scheduleSave(tk.id, local);
       editors.set(tk.id, area);
@@ -99,6 +104,12 @@
     // ---------- список задач ----------
     function statusOf(tk) {
       const sol = data.solutions[tk.id];
+      if (tk.kind === 'game') {
+        if (sol && sol.solvedAt) return { icon: '✓', cls: 'solved', hint: t('gm_cell_solved') };
+        if (sol && sol.publishedAt) return { icon: '🎮', cls: 'partial', hint: t('gm_cell_published') };
+        if (sol && sol.code) return { icon: '✎', cls: 'writing', hint: t('cw_cell_writing') };
+        return { icon: '', cls: '', hint: '' };
+      }
       if (sol && sol.solvedAt) return { icon: '✓', cls: 'solved', hint: t('cw_cell_solved') };
       if (sol && sol.total) return { icon: `${sol.passed}/${sol.total}`, cls: 'partial', hint: t('cw_cell_partial') };
       if (sol && sol.code) return { icon: '✎', cls: 'writing', hint: t('cw_cell_writing') };
@@ -113,7 +124,7 @@
         const st = statusOf(tk);
         return el('button', { type: 'button', class: 'cw-item' + (tk.id === current ? ' active' : ''), onclick: () => openTask(tk.id) },
           el('span', { class: 'cw-num' }, `${i + 1}`),
-          el('span', { class: 'cw-name' }, tk.title, el('span', { class: 'muted small' }, ' · ' + CodeRunner.langName(tk.lang))),
+          el('span', { class: 'cw-name' }, tk.title, el('span', { class: 'muted small' }, ' · ' + (tk.kind === 'game' ? '🎮 ' + t('gm_kind') : CodeRunner.langName(tk.lang)))),
           el('span', { class: 'cw-cell ' + st.cls, title: st.hint }, st.icon));
       }));
     }
@@ -132,6 +143,8 @@
       const box = document.getElementById('task');
       const tk = current && task(current);
       if (!tk) { box.replaceChildren(el('p', { class: 'muted' }, t(data.tasks.length ? 'cw_pick_task' : 'cw_no_tasks_student'))); return; }
+      document.querySelector('main').classList.toggle('gm-wide', !!tk && tk.kind === 'game');
+      if (tk.kind === 'game') { renderGameTask(box, tk); return; }
       const i = data.tasks.indexOf(tk);
       const area = editorFor(tk);
       const examples = tk.tests.map((x, k) => ({ ...x, n: k + 1 })).filter((x) => x.visible);
@@ -184,7 +197,7 @@
       if (prev) out.replaceChildren(checkView(tk, prev.chk, prev.res));
       busy(false);
 
-      box.replaceChildren(
+      box.replaceChildren(...[
         el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, `${i + 1}. ${tk.title}`), el('span', { class: 'badge' }, CodeRunner.langName(tk.lang))),
         tk.text ? el('div', { class: 'sheet-text cw-statement' }, tk.text) : null,
         examples.length ? el('div', { class: 'cw-examples' }, examples.map((x) => el('div', { class: 'cw-example' },
@@ -200,8 +213,146 @@
           if (!confirm(t('cw_reset_q'))) return;
           area.value = tk.starter || ''; scheduleSave(tk.id, area.value);
         } }, t('cw_reset')),
-        out);
+        out].filter(Boolean));
     }
+
+    // ---------- задача-игра (ООП) ----------
+    const stages = new Map();   // id задачи → экран игры (игра не прерывается при обновлении страницы задачи)
+    const lastPublish = new Map();
+    const badgeNames = (ids) => ids.map((id) => t('gm_badge_' + id)).join(', ');
+
+    async function reportScore(tk, n) {
+      const sol = data.solutions[tk.id] || (data.solutions[tk.id] = {});
+      if (sol.bestScore == null || n > sol.bestScore) sol.bestScore = n;
+      if (current === tk.id) { const b = document.getElementById('gm-best'); if (b) b.textContent = t('gm_best_score').replace('{n}', sol.bestScore); }
+      if (!data.isOpen) return;
+      try { sol.bestScore = await rpc('classwork_game_score', { p_token: token, p_task_id: tk.id, p_score: n }, 15000); } catch {}
+    }
+
+    function renderGameTask(box, tk) {
+      const i = data.tasks.indexOf(tk);
+      const area = editorFor(tk);
+      area.rows = 22;
+      const req = (tk.game && tk.game.require) || [];
+      let st = stages.get(tk.id);
+      if (!st) { st = GameKit.stage({ getCode: () => area.value, onScore: (n) => reportScore(tk, n) }); stages.set(tk.id, st); }
+      const live = el('div');
+      const showBadges = () => live.replaceChildren(GameKit.badgesView(area.value, req));
+      let badgeTimer = null;
+      area.oninput = () => { clearTimeout(badgeTimer); badgeTimer = setTimeout(showBadges, 400); };
+      showBadges();
+
+      const sol = data.solutions[tk.id] || {};
+      const info = el('p', { class: 'muted small gm-info' });
+      const showInfo = () => {
+        const x = data.solutions[tk.id] || {};
+        const parts = [x.publishedAt ? t('gm_published_at').replace('{time}', fmtTime(x.publishedAt)) : t('gm_not_published')];
+        info.replaceChildren(parts.join(' · '), ' · ', el('span', { id: 'gm-best' }, x.bestScore != null ? t('gm_best_score').replace('{n}', x.bestScore) : t('gm_no_score')));
+      };
+      showInfo();
+      const out = el('div');
+      const prev = lastPublish.get(tk.id);
+      if (prev) out.replaceChildren(prev);
+      const status = el('span', { class: 'muted' });
+      const pubBtn = el('button', { type: 'button', disabled: !data.isOpen }, t('gm_publish'));
+      pubBtn.addEventListener('click', async () => {
+        pubBtn.disabled = true; status.className = 'muted'; status.textContent = t('gm_publishing');
+        const src = area.value;
+        try {
+          const thumb = await st.snapshot();
+          const res = await rpc('classwork_game_publish', {
+            p_token: token, p_task_id: tk.id, p_code: src, p_badges: [...GameKit.analyze(src).ok],
+            p_score: (data.solutions[tk.id] || {}).bestScore ?? null, p_thumb: thumb,
+          }, 20000);
+          clearTimeout(pending.get(tk.id)); pending.delete(tk.id);
+          const x = data.solutions[tk.id] || (data.solutions[tk.id] = {});
+          Object.assign(x, { code: src, publishedAt: res.publishedAt, bestScore: res.bestScore, badges: res.badges });
+          if (res.solvedAt) x.solvedAt = res.solvedAt;
+          try { localStorage.setItem(draftKey(tk.id), src); } catch {}
+          setSaveState(tk.id, 'cw_saved');
+          status.textContent = '';
+          const msg = el('div', { class: 'cw-result' },
+            el('p', { class: (res.solved ? 'ok' : 'warn') + ' cw-verdict' },
+              res.solved ? t('gm_published_solved') : t('gm_published_missing').replace('{list}', badgeNames(res.missing))),
+            thumb ? null : el('p', { class: 'muted small' }, t('gm_no_thumb')));
+          lastPublish.set(tk.id, msg);
+          out.replaceChildren(msg);
+          showInfo(); renderList();
+        } catch (err) {
+          status.className = 'error'; status.textContent = err.message;
+          if (err.code === 'classwork_closed') setClosed(true);
+        } finally { pubBtn.disabled = !data.isOpen; }
+      });
+
+      const pick = GameKit.starterSelect((k, code) => {
+        if (area.value.trim() && area.value !== code && !confirm(t('gm_starter_replace_q'))) return;
+        area.value = code; scheduleSave(tk.id, code); showBadges();
+      });
+
+      const teacher = sol.points != null || sol.note ? el('div', { class: 'notice gm-teacher' },
+        el('b', {}, t('gm_teacher_mark')), ' ', sol.points != null ? t('gm_points_short').replace('{n}', sol.points) : '',
+        sol.note ? el('div', {}, sol.note) : null) : null;
+
+      const gallery = tk.game && tk.game.gallery === false ? null : galleryBox(tk);
+
+      box.replaceChildren(...[
+        el('div', { class: 'row spread' }, el('h2', { style: 'margin:0' }, `${i + 1}. ${tk.title}`), el('span', { class: 'badge gm-kind' }, '🎮 ' + t('gm_kind'))),
+        tk.text ? el('div', { class: 'sheet-text cw-statement' }, tk.text) : null,
+        el('p', { class: 'muted small' }, req.length ? t('gm_need').replace('{list}', badgeNames(req)) : t('gm_need_none')),
+        teacher,
+        el('div', { class: 'gm-studio' },
+          el('div', { class: 'gm-code' }, area,
+            el('div', { class: 'row spread', style: 'margin-top:8px' },
+              el('span', { class: 'row' }, pubBtn, status),
+              el('span', { class: 'muted small', id: 'save-state' }, '')),
+            info,
+            el('div', { class: 'row', style: 'margin-top:8px' }, pick,
+              el('button', { type: 'button', class: 'secondary small', title: t('cw_reset_hint'), onclick: () => {
+                if (!confirm(t('cw_reset_q'))) return;
+                area.value = tk.starter || ''; scheduleSave(tk.id, area.value); showBadges();
+              } }, t('cw_reset')))),
+          el('div', { class: 'gm-side' }, st.node,
+            el('p', { class: 'muted small', style: 'margin:10px 0 2px' }, t('gm_checks_live')), live,
+            GameKit.cheatSheet())),
+        out,
+        gallery].filter(Boolean));
+    }
+
+    // Игры одноклассников по этой задаче: можно открыть и поиграть.
+    function galleryBox(tk) {
+      const list = el('div', { class: 'gm-gallery' });
+      const load = async () => {
+        list.replaceChildren(el('p', { class: 'muted' }, '…'));
+        try {
+          const games = await rpc('classwork_gallery', { p_token: token, p_task_id: tk.id }, 20000);
+          if (!games.length) { list.replaceChildren(el('p', { class: 'muted' }, t('gm_gallery_empty'))); return; }
+          list.replaceChildren(...games.map((g, k) => el('button', { type: 'button', class: 'gm-card' + (g.mine ? ' mine' : ''), onclick: () => playGame(g) },
+            g.thumb ? el('img', { src: g.thumb, alt: '' }) : el('div', { class: 'gm-nothumb' }, '🎮'),
+            el('b', {}, `${k + 1}. ${g.name}${g.mine ? ' ' + t('gm_you') : ''}`),
+            el('span', { class: 'muted small' }, [g.points != null ? t('gm_points_short').replace('{n}', g.points) : null,
+              g.bestScore != null ? t('gm_best_score').replace('{n}', g.bestScore) : null].filter(Boolean).join(' · ') || ' '))));
+        } catch (err) { list.replaceChildren(el('p', { class: 'error' }, err.message)); }
+      };
+      const d = el('details', { class: 'gm-gallery-box' }, el('summary', {}, '🎮 ' + t('gm_gallery')),
+        el('div', { class: 'row spread' }, el('span', { class: 'muted small' }, t('gm_gallery_hint')),
+          el('button', { type: 'button', class: 'secondary small', onclick: load }, t('gm_refresh'))), list);
+      d.addEventListener('toggle', () => { if (d.open) load(); });
+      return d;
+    }
+
+    let playStage = null;
+    function playGame(g) {
+      const dlg = document.getElementById('play-dialog');
+      document.getElementById('pd-title').textContent = g.name;
+      document.getElementById('pd-code').textContent = g.code || '';
+      if (playStage) playStage.stop();
+      playStage = GameKit.stage({});
+      document.getElementById('pd-stage').replaceChildren(playStage.node);
+      dlg.showModal();
+      playStage.run(g.code || '');
+    }
+    document.getElementById('pd-close').addEventListener('click', () => document.getElementById('play-dialog').close());
+    document.getElementById('play-dialog').addEventListener('close', () => { if (playStage) playStage.stop(); });
 
     // Итог проверки: какие тесты пройдены; у примеров — что ожидалось и что получилось.
     function checkView(tk, chk, res) {
@@ -258,6 +409,9 @@
         const fresh = await rpc('classwork_attempt', { p_token: token }, 15000);
         const changed = JSON.stringify(fresh.tasks) !== JSON.stringify(data.tasks);
         const wasOpen = data.isOpen;
+        // Учитель поставил баллы или написал комментарий к игре — показываем сразу.
+        const markOf = (sols) => { const x = current && sols[current]; return x ? `${x.points}|${x.note}` : ''; };
+        const markChanged = markOf(fresh.solutions) !== markOf(data.solutions);
         for (const [k, v] of Object.entries(fresh.solutions)) {
           data.solutions[k] = { ...v, code: (data.solutions[k] && data.solutions[k].code) ?? v.code };
         }
@@ -268,7 +422,7 @@
           if (current && !task(current)) current = (data.tasks[0] && data.tasks[0].id) || null;
           renderList();
         }
-        if (changed || wasOpen !== data.isOpen) renderTask();
+        if (changed || wasOpen !== data.isOpen || markChanged) renderTask();
         showError(null);
       } catch (err) {
         if (err.code === 'unauthorized') { try { localStorage.removeItem(storeKey); } catch {} location.reload(); }

@@ -243,26 +243,26 @@ const GameKit = (() => {
   const STARTERS = {
     blank: `from engine import *
 
-# 1. Здесь ваши классы. Каждая вещь в игре — это класс.
+# 1. Your classes go here. Each thing in your game is a class.
 class Player(Entity):
     def __init__(self, x, y):
         super().__init__(x, y, 32, 32, image="hero")
 
     def update(self, game, dt):
-        pass   # двигаться, анимироваться, реагировать
+        pass   # move, animate, react
 
 
-# 2. Класс игры хранит правила.
+# 2. The game class holds the rules.
 class MyGame(Game):
     def __init__(self):
-        super().__init__(640, 360, "Моя игра")
+        super().__init__(640, 360, "My Game")
         self.player = self.add(Player(300, 160))
 
     def update(self, dt):
-        super().update(dt)     # обновляет все объекты
+        super().update(dt)     # updates every entity
 
     def draw_ui(self, screen):
-        screen.text("Очки: " + str(self.score), 10, 10, 20)
+        screen.text("Score: " + str(self.score), 10, 10, 20)
 
 
 MyGame().run()
@@ -272,15 +272,15 @@ MyGame().run()
 class MyGame(Game):
     def __init__(self):
         super().__init__(640, 360)
-        self.box_x = 0                      # где сейчас квадрат
+        self.box_x = 0                      # where the box is
 
-    def update(self, dt):                   # примерно 60 раз в секунду
-        self.box_x += 120 * dt              # 120 пикселей в секунду
+    def update(self, dt):                   # runs about 60 times per second
+        self.box_x += 120 * dt              # 120 pixels per second
         if self.box_x > self.width:
             self.box_x = -40
 
-    def draw_ui(self, screen):              # рисуется после карты и объектов
-        screen.text("Привет, OOP Game Jam!", 20, 20, 24, "white")
+    def draw_ui(self, screen):              # runs after the map and entities are drawn
+        screen.text("Hello, OOP Game Jam!", 20, 20, 24, "white")
         screen.rect(self.box_x, 160, 40, 40, "orange")
 
 MyGame().run()
@@ -290,10 +290,10 @@ MyGame().run()
 class Player(Entity):
     def __init__(self, x, y):
         super().__init__(x, y, 32, 32, image="hero")
-        self.__speed = 180          # приватный атрибут: его трогает только Player
+        self.__speed = 180          # private: only Player code touches it
         self.__lives = 3
 
-    def get_lives(self):            # геттер: другие классы читают жизни через метод
+    def get_lives(self):            # a getter lets others read it safely
         return self.__lives
 
     def lose_life(self):
@@ -308,7 +308,7 @@ class Player(Entity):
             self.y -= self.__speed * dt
         if game.key("down"):
             self.y += self.__speed * dt
-        # не выходить за край окна
+        # stay inside the window
         self.x = max(0, min(self.x, game.width - self.w))
         self.y = max(0, min(self.y, game.height - self.h))
 
@@ -318,8 +318,8 @@ class MyGame(Game):
         self.player = self.add(Player(300, 160))
 
     def draw_ui(self, screen):
-        screen.text("Жизни: " + str(self.player.get_lives()), 10, 10, 20)
-        screen.text("Двигайтесь стрелками", 10, 336, 14, "#9db4d6")
+        screen.text("Lives: " + str(self.player.get_lives()), 10, 10, 20)
+        screen.text("Move with the arrow keys", 10, 336, 14, "#9db4d6")
 
 MyGame().run()
 `,
@@ -328,20 +328,20 @@ MyGame().run()
 class Player(Entity):
     def __init__(self, x, y):
         super().__init__(x, y, 64, 64)
-        self.anim = Animation("hero_walk", fps=8)   # лист из 4 кадров
+        self.anim = Animation("hero_walk", fps=8)   # a sprite sheet with 4 frames
         self.__speed = 160
 
     def update(self, game, dt):
         moving = False
         if game.key("left"):
             self.x -= self.__speed * dt
-            self.flip = True                         # смотрит влево
+            self.flip = True                         # face left
             moving = True
         if game.key("right"):
             self.x += self.__speed * dt
             self.flip = False
             moving = True
-        self.anim.playing = moving                   # анимация только в движении
+        self.anim.playing = moving                   # animate only while moving
         if not moving:
             self.anim.reset()
 
@@ -351,7 +351,7 @@ class MyGame(Game):
         self.player = self.add(Player(280, 250))
 
     def draw_ui(self, screen):
-        screen.text("Влево / вправо: идти", 10, 10, 18)
+        screen.text("Left / Right: walk", 10, 10, 18)
 
 MyGame().run()
 `,
@@ -380,7 +380,7 @@ class Player(Entity):
         dx = (game.key("right") - game.key("left")) * self.__speed * dt
         dy = (game.key("down") - game.key("up")) * self.__speed * dt
         if not game.tilemap.blocked(self.x + dx, self.y, self.w, self.h):
-            self.x += dx                  # стены проверяем по каждой оси отдельно
+            self.x += dx                  # walls stop us on each axis separately
         if not game.tilemap.blocked(self.x, self.y + dy, self.w, self.h):
             self.y += dy
 
@@ -388,7 +388,7 @@ class MyGame(Game):
     def __init__(self):
         super().__init__(640, 352)
         self.tilemap = TileMap(LEVEL, tile=32, legend={"#": "wall"}, solid="#")
-        px, py = self.tilemap.find("P")[0]    # точка старта берётся из карты
+        px, py = self.tilemap.find("P")[0]    # spawn point from the map
         self.tilemap.replace("P", ".")
         self.player = self.add(Player(px + 2, py + 2))
 
@@ -396,14 +396,14 @@ MyGame().run()
 `,
     inherit: `from engine import *
 
-class Item(Entity):                       # РОДИТЕЛЬСКИЙ класс
+class Item(Entity):                       # PARENT class
     def __init__(self, x, y, image):
         super().__init__(x, y, 32, 32, image=image)
 
-    def on_touch(self, game):             # дети переопределяют этот метод
+    def on_touch(self, game):             # children override this
         pass
 
-class Coin(Item):                         # ДОЧЕРНИЙ класс
+class Coin(Item):                         # CHILD class
     def __init__(self, x, y):
         super().__init__(x, y, "coin")
 
@@ -411,7 +411,7 @@ class Coin(Item):                         # ДОЧЕРНИЙ класс
         game.score += 10
         self.kill()
 
-class Bomb(Item):                         # ещё один ребёнок: тот же метод, другое поведение
+class Bomb(Item):                         # another CHILD, same method, other behaviour
     def __init__(self, x, y):
         super().__init__(x, y, "enemy")
 
@@ -428,7 +428,7 @@ class Player(Entity):
         self.y += (game.key("down") - game.key("up")) * 200 * dt
         for e in game.entities:
             if isinstance(e, Item) and self.collides(e):
-                e.on_touch(game)          # ПОЛИМОРФИЗМ: каждый Item реагирует по-своему
+                e.on_touch(game)          # POLYMORPHISM: each Item reacts its own way
 
 class MyGame(Game):
     def __init__(self):
@@ -439,7 +439,7 @@ class MyGame(Game):
             self.add(Bomb(rand(20, 600), rand(20, 320)))
 
     def draw_ui(self, screen):
-        screen.text("Очки: " + str(self.score), 10, 10, 20)
+        screen.text("Score: " + str(self.score), 10, 10, 20)
 
 MyGame().run()
 `,
@@ -456,7 +456,7 @@ class Player(Entity):
         return self.__lives
 
     def hurt(self):
-        if self.__hurt_timer <= 0:          # короткая защита после удара
+        if self.__hurt_timer <= 0:          # short protection after a hit
             self.__lives -= 1
             self.__hurt_timer = 1.0
 
@@ -520,12 +520,12 @@ class CoinGame(Game):
             self.report_score(self.score + self.player.get_lives() * 20)
 
     def draw_ui(self, screen):
-        screen.text("Очки: " + str(self.score), 10, 10, 20)
-        screen.text("Жизни: " + str(self.player.get_lives()), 520, 10, 20)
+        screen.text("Score: " + str(self.score), 10, 10, 20)
+        screen.text("Lives: " + str(self.player.get_lives()), 540, 10, 20)
         if self.state == "win":
-            screen.text("ПОБЕДА!  Enter — ещё раз", 320, 160, 26, "#ffd166", "center")
+            screen.text("YOU WIN!  Enter = play again", 320, 160, 26, "#ffd166", "center")
         if self.state == "lose":
-            screen.text("ИГРА ОКОНЧЕНА  Enter — ещё раз", 320, 160, 26, "#ff4d6d", "center")
+            screen.text("GAME OVER  Enter = play again", 320, 160, 26, "#ff4d6d", "center")
 
 CoinGame().run()
 `,
@@ -569,7 +569,7 @@ class DodgeGame(Game):
             return
         super().update(dt)
         self.timer -= dt
-        if self.timer <= 0:                       # новый камень
+        if self.timer <= 0:                       # spawn a new rock
             self.add(Rock(rand(0, 600), rand(120, 120 + self.dodged * 6)))
             self.timer = max(0.25, 0.9 - self.dodged * 0.02)
         for e in self.entities:
@@ -578,9 +578,9 @@ class DodgeGame(Game):
                 self.report_score(self.dodged)
 
     def draw_ui(self, screen):
-        screen.text("Увернулся: " + str(self.dodged), 10, 10, 20)
+        screen.text("Dodged: " + str(self.dodged), 10, 10, 20)
         if self.state == "lose":
-            screen.text("БАХ!  Enter — ещё раз", 320, 150, 26, "#ff4d6d", "center")
+            screen.text("CRASH!  Enter = try again", 320, 150, 26, "#ff4d6d", "center")
 
 DodgeGame().run()
 `,
@@ -653,14 +653,14 @@ class MazeGame(Game):
             self.report_score(max(10, 100 - int(self.time)))
 
     def draw_ui(self, screen):
-        screen.text("Монеты: " + str(self.score) + "   Время: " + str(int(self.time)), 8, 4, 16, "#ffd166")
+        screen.text("Coins: " + str(self.score) + "   Time: " + str(int(self.time)), 8, 4, 16, "#ffd166")
         if self.state == "win":
-            screen.text("ВЫ ВЫБРАЛИСЬ!  Enter — ещё раз", 320, 160, 26, "#2ec4b6", "center")
+            screen.text("YOU ESCAPED!  Enter = again", 320, 160, 26, "#2ec4b6", "center")
 
 MazeGame().run()
 `,
   };
-  // Каркасы для урока Game Jam: почти без готового кода, только подсказки TODO.
+  // Каркасы для урока Game Jam: почти без готового кода, только подсказки TODO (код и комментарии — на английском, как в OOP Game Jam).
   // Полные примеры остаются в STARTERS (учитель может подставить их сам).
   const TASKS = {
     loop: `from engine import *
@@ -668,16 +668,16 @@ MazeGame().run()
 class MyGame(Game):
     def __init__(self):
         super().__init__(640, 360)
-        # TODO: заведите атрибут — координату x квадрата
+        # TODO: add an attribute: the x position of the box
 
     def update(self, dt):
-        # TODO: двигайте квадрат вправо со скоростью 120 пикселей в секунду (скорость * dt)
-        # TODO: у края окна квадрат должен отскакивать
+        # TODO: move the box right at 120 pixels per second (speed * dt)
+        # TODO: make the box bounce back at the window edges
         pass
 
     def draw_ui(self, screen):
-        # TODO: напишите приветствие: screen.text(...)
-        # TODO: нарисуйте квадрат 40×40: screen.rect(...)
+        # TODO: write a greeting: screen.text(...)
+        # TODO: draw a 40×40 box: screen.rect(...)
         pass
 
 MyGame().run()
@@ -687,13 +687,13 @@ MyGame().run()
 class Player(Entity):
     def __init__(self, x, y):
         super().__init__(x, y, 32, 32, image="hero")
-        # TODO: приватные атрибуты: скорость и жизни (self.__...)
+        # TODO: private attributes: speed and lives (self.__...)
 
-    # TODO: метод get_lives()
+    # TODO: a get_lives() method
 
     def update(self, game, dt):
-        # TODO: движение стрелками (game.key("left") ...), скорость * dt
-        # TODO: игрок не выходит за край окна
+        # TODO: move with the arrow keys (game.key("left") ...), speed * dt
+        # TODO: the player cannot leave the window
         pass
 
 class MyGame(Game):
@@ -702,7 +702,7 @@ class MyGame(Game):
         self.player = self.add(Player(300, 160))
 
     def draw_ui(self, screen):
-        # TODO: покажите жизни игрока через get_lives()
+        # TODO: show the player's lives using get_lives()
         pass
 
 MyGame().run()
@@ -712,12 +712,12 @@ MyGame().run()
 class Player(Entity):
     def __init__(self, x, y):
         super().__init__(x, y, 64, 64)
-        # TODO: self.anim = Animation(...) — лист "hero_walk"
-        # TODO: приватная скорость
+        # TODO: self.anim = Animation(...) using the "hero_walk" sheet
+        # TODO: a private speed
 
     def update(self, game, dt):
-        # TODO: влево / вправо; self.flip = True, когда идёт влево
-        # TODO: анимация играет только в движении
+        # TODO: walk left / right; self.flip = True when walking left
+        # TODO: the animation plays only while moving
         pass
 
 class MyGame(Game):
@@ -729,7 +729,7 @@ MyGame().run()
 `,
     map: `from engine import *
 
-# TODO: нарисуйте свой уровень: # — стена, . — пол, P — старт, C — монета
+# TODO: draw your own level: # wall, . floor, P start, C coin
 LEVEL = [
     "####################",
     "#P.................#",
@@ -743,47 +743,47 @@ class Player(Entity):
         super().__init__(x, y, 28, 28, image="hero")
 
     def update(self, game, dt):
-        # TODO: движение; сквозь стены нельзя (game.tilemap.blocked(...)), x и y проверяйте отдельно
+        # TODO: movement; no walking through walls (game.tilemap.blocked(...)), check x and y separately
         pass
 
-# TODO: класс Coin
+# TODO: a Coin class
 
 class MyGame(Game):
     def __init__(self):
         super().__init__(640, 352)
         self.tilemap = TileMap(LEVEL, tile=32, legend={"#": "wall"}, solid="#")
-        # TODO: найдите P на карте (find) и поставьте туда игрока
-        # TODO: поставьте монеты на места C
+        # TODO: find P on the map (find) and put the player there
+        # TODO: put coins on the C tiles
 
 MyGame().run()
 `,
     inherit: `from engine import *
 
 class Item(Entity):
-    # TODO: __init__(self, x, y, image) и метод on_touch(self, game)
+    # TODO: __init__(self, x, y, image) and a method on_touch(self, game)
     pass
 
-# TODO: class Coin(Item) — +10 очков
-# TODO: class Bomb(Item) — -20 очков
-# TODO: ещё один предмет на ваш выбор
+# TODO: class Coin(Item): +10 points
+# TODO: class Bomb(Item): -20 points
+# TODO: one more item of your own
 
 class Player(Entity):
     def __init__(self, x, y):
         super().__init__(x, y, 32, 32, image="hero")
 
     def update(self, game, dt):
-        # TODO: движение
-        # TODO: при касании любого Item вызвать его on_touch(game)
+        # TODO: movement
+        # TODO: when touching any Item, call its on_touch(game)
         pass
 
 class MyGame(Game):
     def __init__(self):
         super().__init__(640, 360)
         self.player = self.add(Player(300, 160))
-        # TODO: разбросайте предметы (rand)
+        # TODO: scatter items around (rand)
 
     def draw_ui(self, screen):
-        screen.text("Очки: " + str(self.score), 10, 10, 20)
+        screen.text("Score: " + str(self.score), 10, 10, 20)
 
 MyGame().run()
 `,
@@ -801,9 +801,11 @@ MyGame().run()
 
   // ---------- готовый урок: 5 коротких шагов и своя игра ----------
   function jamLesson() {
-    // Заготовки — каркасы с TODO: ученик пишет код сам.
+    // Заготовки — каркасы с TODO: ученик пишет код сам. Урок всегда на английском (так попросила владелица),
+    // на каком бы языке ни был сайт у учителя.
+    const en = (k) => (I18N.en && I18N.en[k]) || t(k);
     const step = (n, starter, require) => ({
-      kind: 'game', lang: 'python', title: t('gm_jam_' + n + '_title'), text: t('gm_jam_' + n + '_text'),
+      kind: 'game', lang: 'python', title: en('gm_jam_' + n + '_title'), text: en('gm_jam_' + n + '_text'),
       starter, tests: [], game: { require, gallery: n === 6 },
     });
     return [step(1, TASKS.loop, []), step(2, TASKS.player, ['enc']), step(3, TASKS.sprite, []), step(4, TASKS.map, ['classes']),

@@ -284,11 +284,6 @@
         } finally { pubBtn.disabled = !data.isOpen; }
       });
 
-      const pick = GameKit.starterSelect((k, code) => {
-        if (area.value.trim() && area.value !== code && !confirm(t('gm_starter_replace_q'))) return;
-        area.value = code; scheduleSave(tk.id, code); showBadges();
-      });
-
       const teacher = sol.points != null || sol.note ? el('div', { class: 'notice gm-teacher' },
         el('b', {}, t('gm_teacher_mark')), ' ', sol.points != null ? t('gm_points_short').replace('{n}', sol.points) : '',
         sol.note ? el('div', {}, sol.note) : null) : null;
@@ -306,7 +301,7 @@
               el('span', { class: 'row' }, pubBtn, status),
               el('span', { class: 'muted small', id: 'save-state' }, '')),
             info,
-            el('div', { class: 'row', style: 'margin-top:8px' }, pick,
+            el('div', { class: 'row', style: 'margin-top:8px' },
               el('button', { type: 'button', class: 'secondary small', title: t('cw_reset_hint'), onclick: () => {
                 if (!confirm(t('cw_reset_q'))) return;
                 area.value = tk.starter || ''; scheduleSave(tk.id, area.value); showBadges();
